@@ -83,9 +83,20 @@ pub fn render(config: &Config) -> Result<String> {
 const DEPENDENCIES: &str = r#"#!/bin/sh
 set -eu
 export DEBIAN_FRONTEND=noninteractive
-printf 'APT::Snapshot "@SNAPSHOT@";\n' > /etc/apt/apt.conf.d/50-luhmen-snapshot
+# Pin the source URL itself: snapshot autodetection needs an existing Release
+# index, which this minimal image does not contain on its first boot.
+cat > /etc/apt/sources.list.d/ubuntu.sources <<'SOURCES'
+Types: deb
+URIs: https://snapshot.ubuntu.com/ubuntu/@SNAPSHOT@
+Suites: noble noble-updates noble-security
+Components: main universe
+Architectures: arm64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+Snapshot: no
+SOURCES
+rm -f /etc/apt/apt.conf.d/50-luhmen-snapshot
 if ! command -v iptables >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then
-    apt-get update
+    apt-get update -o APT::Update::Error-Mode=any
     apt-get install -y --no-install-recommends iptables nftables rsync curl ca-certificates
 fi
 "#;

@@ -23,7 +23,6 @@ import uuid
 
 
 BASE_IMAGE = "busybox:1.37.0@sha256:f10e809bcf667d8e9f01d2baf82869049a495cd448cdfe1f4dee94078b960ae9"
-SNAPSHOT = "20260906T000000Z"
 OWNER_LABEL = "io.luhmen.smoke.run"
 CONTEXT_DESCRIPTION = "luhmen managed Docker Engine (schema 1)"
 
@@ -289,8 +288,8 @@ class Suite:
         emit("docker_daemon_failure_recovery", "passed", seconds=time.monotonic() - started)
 
     def watchers(self):
-        self.guest("sudo", "apt-get", "update", "--snapshot", SNAPSHOT, timeout=180)
-        self.guest("sudo", "apt-get", "install", "-y", "--no-install-recommends", "--snapshot", SNAPSHOT,
+        self.guest("sudo", "apt-get", "update", "-o", "APT::Update::Error-Mode=any", timeout=180)
+        self.guest("sudo", "apt-get", "install", "-y", "--no-install-recommends",
                    "inotify-tools", timeout=180)
         shared = self.fixture / "shared"
         (shared / "nested").mkdir()

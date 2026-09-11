@@ -48,7 +48,6 @@ impl Runtime {
             Command::new(std::env::var_os("LUHMEN_LIMACTL").unwrap_or_else(|| "limactl".into()));
         command
             .env("LIMA_HOME", self.state.join("lima"))
-            .env("LIMA_CACHE_HOME", self.state.join("cache"))
             .env_remove("LIMA_INSTANCE")
             .env("LIMA_SSH_PORT_FORWARDER", "false");
         command
@@ -211,7 +210,30 @@ impl Runtime {
             Path::new(dir) == self.state.join("lima/luhmen"),
             "Lima instance directory does not match luhmen state"
         );
-        Ok(Some(vm))
+        // Keep diagnostics useful without exposing Lima's full provisioning scripts,
+        // environment variables, or host account metadata through this API.
+        let mut summary = serde_json::Map::new();
+        for key in [
+            "name",
+            "dir",
+            "status",
+            "vmType",
+            "arch",
+            "cpus",
+            "memory",
+            "disk",
+            "hostname",
+            "limaVersion",
+            "sshLocalPort",
+            "hostAgentPID",
+            "driverPID",
+            "errors",
+        ] {
+            if let Some(value) = vm.get(key) {
+                summary.insert(key.to_owned(), value.clone());
+            }
+        }
+        Ok(Some(Value::Object(summary)))
     }
 
     fn context_exists(&self) -> Result<bool> {

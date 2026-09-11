@@ -38,7 +38,7 @@ set -eu
 printf '%s\n' "$*" >> "$FIXTURE/lima-calls"
 case "$1" in
   --version) printf 'limactl version 2.2.0\n' ;;
-  list) printf '{"name":"luhmen","status":"%s","dir":"%s/luhmen"}\n' "$(cat "$LIMA_HOME/luhmen/status")" "$LIMA_HOME" ;;
+  list) printf '{"name":"luhmen","status":"%s","dir":"%s/luhmen","config":{"env":{"LUHMEN_TEST_VALUE":"fixture-only-do-not-print"}}}\n' "$(cat "$LIMA_HOME/luhmen/status")" "$LIMA_HOME" ;;
   stop) printf stop >> "$FIXTURE/workload-actions"; printf Stopped > "$LIMA_HOME/luhmen/status" ;;
   start) printf start >> "$FIXTURE/workload-actions"; printf Running > "$LIMA_HOME/luhmen/status" ;;
   shell) printf shell >> "$FIXTURE/workload-actions" ;;
@@ -100,6 +100,8 @@ fn inspect_reports_vm_and_engine_health_separately() {
     assert_eq!(report["engine_ready"], false);
     assert_eq!(report["context_ready"], true);
     assert_eq!(report["config"]["memory_gib"], 2);
+    assert!(report["vm"].get("config").is_none());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-only-do-not-print"));
 }
 
 #[test]

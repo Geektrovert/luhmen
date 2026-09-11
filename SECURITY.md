@@ -2,9 +2,9 @@
 
 ## Reporting a vulnerability
 
-Use the repository's [Security page](https://github.com/Geektrovert/luhmen/security) and select **Report a vulnerability** if private reporting is available. Include the affected commit or version, reproduction steps, expected impact, and any relevant logs with secrets removed.
+Report vulnerabilities through the repository's [private report form](https://github.com/Geektrovert/luhmen/security/advisories/new). Include the affected commit or version, reproduction steps, expected impact, and any relevant logs with secrets removed.
 
-Private reporting has not yet been verified for this unreleased repository. If the button is unavailable, open an issue asking for a private contact method. Keep vulnerability details, exploit code, credentials, and private logs out of that public issue.
+If the form is unavailable, open an issue asking for a private contact method. Keep vulnerability details, exploit code, credentials, and private logs out of that public issue.
 
 There are no stable releases or published security support periods yet.
 

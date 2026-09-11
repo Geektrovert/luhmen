@@ -4,6 +4,7 @@ use serde_json::json;
 use crate::config::{Config, LIMA_VERSION};
 
 pub const IMAGE_URL: &str = "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20260905/ubuntu-24.04-minimal-cloudimg-arm64.img";
+pub const IMAGE_MIRROR_URL: &str = "https://mirrors.ustc.edu.cn/ubuntu-cloud-images/minimal/releases/noble/release-20260905/ubuntu-24.04-minimal-cloudimg-arm64.img";
 pub const IMAGE_SHA256: &str = "8b6e0e145ae2ce681d959b2b3aabcf724b027cbffff9ec8ba4d7dc789a3e6a98";
 pub const DOCKER_VERSION: &str = "29.8.0";
 pub const DOCKER_URL: &str =
@@ -37,7 +38,10 @@ pub fn render(config: &Config) -> Result<String> {
         "vmType": "vz",
         "arch": "aarch64",
         "os": "Linux",
-        "images": [{ "location": IMAGE_URL, "arch": "aarch64", "digest": format!("sha256:{IMAGE_SHA256}") }],
+        "images": [
+            { "location": IMAGE_URL, "arch": "aarch64", "digest": format!("sha256:{IMAGE_SHA256}") },
+            { "location": IMAGE_MIRROR_URL, "arch": "aarch64", "digest": format!("sha256:{IMAGE_SHA256}") }
+        ],
         "cpus": config.cpus,
         "memory": format!("{}GiB", config.memory_gib),
         "disk": format!("{}GiB", config.disk_gib),
@@ -208,10 +212,12 @@ mod tests {
             }])
         );
         assert_eq!(document["portForwards"][1]["hostIP"], "127.0.0.1");
-        assert_eq!(document["images"].as_array().unwrap().len(), 1);
         assert_eq!(
-            document["images"][0]["digest"],
-            format!("sha256:{IMAGE_SHA256}")
+            document["images"],
+            json!([
+                { "location": IMAGE_URL, "arch": "aarch64", "digest": format!("sha256:{IMAGE_SHA256}") },
+                { "location": IMAGE_MIRROR_URL, "arch": "aarch64", "digest": format!("sha256:{IMAGE_SHA256}") }
+            ])
         );
     }
 

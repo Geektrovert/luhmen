@@ -20,6 +20,8 @@ Creation needs at least 15 GiB of free host storage; start and restart need 2 Gi
 
 Free-space checks do not reserve disk capacity. `luhmen create --dry-run` validates the configuration and prints the Lima settings without creating state or invoking Lima.
 
+Creation tries Canonical's Ubuntu image server first and the [USTC mirror](https://mirrors.ustc.edu.cn/help/ubuntu-cloud-images.html) if that download fails. Both URLs require the same pinned SHA-256 digest. A failed primary connection can add about 30 seconds before Lima tries the mirror. If both fail, inspect the reported download errors and retry after restoring network access.
+
 The stored configuration uses this format:
 
 ```json

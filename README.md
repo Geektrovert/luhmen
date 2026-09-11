@@ -2,7 +2,7 @@
 
 luhmen runs Docker Engine in a dedicated Linux VM on Apple Silicon Macs. Its Rust CLI manages Lima with Apple's Virtualization.framework. Docker CLI, Compose, Buildx, and SDK clients use the Engine API through the `luhmen` Docker context.
 
-This is an unreleased development preview for local development. Expect CLI and configuration changes before a stable release. See [supported platforms, versions, and limits](docs/support.md).
+This is a development preview for local development. Expect CLI and configuration changes before a stable release. See [supported platforms, versions, and limits](docs/support.md).
 
 ## Requirements
 
@@ -13,6 +13,8 @@ This is an unreleased development preview for local development. Expect CLI and 
 - Internet access for VM creation, first-start guest packages, and container images.
 
 ## Install and start
+
+For prebuilt macOS arm64 packages, see [GitHub Releases](https://github.com/Geektrovert/luhmen/releases) and the [archive installation instructions](docs/install.md#release-archives).
 
 Install Rust, Python, and the [Docker client and plugins](docs/install.md#docker-client-and-plugins) first. Then clone and build:
 

@@ -2,7 +2,7 @@
 
 luhmen requires an Apple Silicon Mac running macOS 14 or newer. macOS 14 is the minimum deployment target, but has not been verified with a live VM. Intel Macs, Linux hosts, and Windows hosts are unsupported. Rust tests can run on Linux without virtualization.
 
-luhmen is an unreleased development preview. The CLI, saved configuration, and JSON output can change before a stable release. There is no compatibility or migration guarantee between development commits. Automated checks cover CLI behavior and packaging; they do not establish VM behavior on every supported macOS version.
+luhmen is a development preview. The CLI, saved configuration, and JSON output can change before a stable release. There is no compatibility or migration guarantee between development commits. Automated checks cover CLI behavior and packaging; they do not establish VM behavior on every supported macOS version.
 
 ## Version policy
 

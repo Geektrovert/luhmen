@@ -48,9 +48,7 @@ VM creation downloads a checksum-pinned Ubuntu image. The first start installs g
 
 ## Release archives
 
-There are no published release archives yet. Build from source using the instructions above.
-
-When a release is available, download its `luhmen-<version>-aarch64-apple-darwin.tar.gz` archive and `SHA256SUMS` from the same release. Set `luhmen_version` to the downloaded version and verify the archive before extracting it:
+Find release downloads on [GitHub Releases](https://github.com/Geektrovert/luhmen/releases). Download the `luhmen-<version>-aarch64-apple-darwin.tar.gz` archive and `SHA256SUMS` from the same release. Set `luhmen_version` to the downloaded version and verify the archive before extracting it:
 
 ```sh
 luhmen_version=0.1.0

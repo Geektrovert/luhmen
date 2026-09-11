@@ -19,6 +19,8 @@ These components are installed or downloaded separately. They are not included i
 
 The guest contains additional distribution packages under their respective licenses. Package copyright files are available under `/usr/share/doc` in the VM. Distribution package sources are available through the corresponding Ubuntu and Docker upstream repositories. Redistributing a guest disk is outside the binary release process and requires its own complete license and source-offer review.
 
+VM creation downloads the Ubuntu image from Canonical first, then tries the [USTC Ubuntu Cloud Images mirror](https://mirrors.ustc.edu.cn/help/ubuntu-cloud-images.html) if the primary download fails. Both locations use the same pinned image version and SHA-256 digest.
+
 ## Rust dependencies
 
 `Cargo.lock` pins Rust dependencies. `scripts/collect-licenses.py` reads Cargo's locked dependency metadata for the selected platform and copies the license, copyright, and notice files distributed in each dependency's source package. Binary releases include an index and these actual texts under `share/licenses/luhmen/dependencies`.

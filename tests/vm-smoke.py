@@ -346,7 +346,9 @@ class Suite:
         emit("bind_mounts_and_container_limits", "passed")
         self.guest("getent", "ahostsv4", "host.docker.internal")
         self.docker("exec", self.container_id, "nslookup", "host.docker.internal")
-        self.docker("exec", self.container_id, "nslookup", "web")
+        # BusyBox nslookup applies host search suffixes to an unqualified name.
+        # Query the service record directly; dns_and_proxy checks HTTP via "web".
+        self.docker("exec", self.container_id, "nslookup", "web.")
         emit("guest_host_alias_and_compose_dns", "passed")
 
     def coherence(self):

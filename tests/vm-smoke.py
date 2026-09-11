@@ -8,7 +8,11 @@ JSON Lines on stdout record results; generated fixtures remain available.
 """
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import http.client
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -19,12 +23,110 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
+from urllib.parse import urlsplit
 import uuid
 
 
 BASE_IMAGE = "busybox:1.37.0@sha256:f10e809bcf667d8e9f01d2baf82869049a495cd448cdfe1f4dee94078b960ae9"
 OWNER_LABEL = "io.luhmen.smoke.run"
 CONTEXT_DESCRIPTION = "luhmen managed Docker Engine (schema 1)"
+PROXY_VARIABLES = ("http_proxy", "https_proxy", "ftp_proxy", "all_proxy", "no_proxy",
+                   "HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def local_ipv4_addresses():
+    # Read interface addresses without changing routes, DNS, or VPN configuration.
+    output = command(["/sbin/ifconfig", "-a"]).stdout
+    addresses = {str(ipaddress.ip_address(value))
+                 for value in re.findall(r"^\s+inet (\S+)", output, re.MULTILINE)}
+    return sorted(address for address in addresses
+                  if not ipaddress.ip_address(address).is_loopback)
+
+
+def port_closed(address, port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as stream:
+        stream.settimeout(1)
+        require(stream.connect_ex((address, port)) != 0,
+                f"Unexpected listener at {address}:{port}")
+
+
+@contextmanager
+def http_fixture(token):
+    """Two loopback-only HTTP fixtures, with no arbitrary proxy destinations."""
+    hits = {"origin": [], "proxy": []}
+    servers = []
+    threads = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            self.request.settimeout(3)
+            super().setup()
+
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            self.server.requests += 1
+            if self.server.requests > 100:
+                self.send_error(429)
+                return
+            path = self.path
+            if self.server.role == "proxy":
+                target = urlsplit(path)
+                if (target.scheme != "http" or target.netloc != authority
+                        or target.query or target.fragment):
+                    self.send_error(403)
+                    return
+                path = target.path
+            if not path.startswith("/" + token + "/") or len(path) > 128:
+                self.send_error(404)
+                return
+            hits[self.server.role].append(path)
+            if self.server.role == "proxy" and path.endswith("/failure"):
+                self.send_error(503)
+                return
+            body = token.encode()
+            if self.server.role == "proxy":
+                upstream = http.client.HTTPConnection("127.0.0.1", servers[0].server_port, timeout=3)
+                try:
+                    upstream.request("GET", path)
+                    response = upstream.getresponse()
+                    body = response.read(4096)
+                    if response.status != 200 or body != token.encode():
+                        self.send_error(502)
+                        return
+                except (OSError, http.client.HTTPException):
+                    self.send_error(502)
+                    return
+                finally:
+                    upstream.close()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    try:
+        for role in ("origin", "proxy"):
+            server = HTTPServer(("127.0.0.1", 0), Handler)
+            server.role = role
+            server.requests = 0
+            servers.append(server)
+        authority = "host.docker.internal:" + str(servers[0].server_port)
+        for server in servers:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            threads.append(thread)
+        yield {"origin": "http://" + authority,
+               "proxy": "http://host.docker.internal:" + str(servers[1].server_port),
+               "host_origin": "http://127.0.0.1:" + str(servers[0].server_port),
+               "hits": hits}
+    finally:
+        for server, thread in zip(servers, threads):
+            server.shutdown()
+            thread.join(timeout=5)
+        for server in servers:
+            server.server_close()
 
 
 def emit(check, status, **details):
@@ -85,7 +187,8 @@ class Suite:
         self.endpoint = None
         self.compose_attempted = False
         self.container_id = None
-        self.images = [f"{self.run_id}-app:smoke", f"{self.run_id}-build:smoke"]
+        self.images = [f"{self.run_id}-app:smoke", f"{self.run_id}-build:smoke",
+                       f"{self.run_id}-proxy:smoke"]
 
     def inspect(self):
         return json.loads(command([self.luhmen, "inspect", "--json"], timeout=30).stdout)
@@ -169,6 +272,9 @@ class Suite:
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             self.port = reservation.getsockname()[1]
+        self.non_loopback_addresses = local_ipv4_addresses()
+        for address in ["127.0.0.1", *self.non_loopback_addresses]:
+            port_closed(address, self.port)
         compose = {
             "services": {"web": {
                 "build": {"context": "."}, "image": self.images[0],
@@ -243,6 +349,180 @@ class Suite:
         self.docker("exec", self.container_id, "nslookup", "web")
         emit("guest_host_alias_and_compose_dns", "passed")
 
+    def coherence(self):
+        payloads = [uuid.uuid4().hex * 128 for _ in range(4)]
+        final_files = []
+        for direction in ("host_to_container", "container_to_host"):
+            directory = self.fixture / "shared" / direction
+            directory.mkdir()
+            path = directory / "state.txt"
+            guest_path = "/shared/" + direction + "/state.txt"
+            current = path
+            remote = guest_path
+
+            def write(destination, content):
+                if direction == "host_to_container":
+                    destination.write_text(content)
+                else:
+                    target = "/shared/" + str(destination.relative_to(self.fixture / "shared"))
+                    self.docker("exec", self.container_id, "sh", "-c",
+                                'printf %s "$2" > "$1"', "sh", target, content)
+
+            def move(source, destination):
+                if direction == "host_to_container":
+                    source.replace(destination)
+                else:
+                    root = self.fixture / "shared"
+                    self.docker("exec", self.container_id, "mv",
+                                "/shared/" + str(source.relative_to(root)),
+                                "/shared/" + str(destination.relative_to(root)))
+
+            def visible(expected):
+                if direction == "host_to_container":
+                    result = self.docker("exec", self.container_id, "cat", remote, check=False)
+                    require(result.returncode == 0 and result.stdout == expected,
+                            "Container file contents differ from the host write")
+                else:
+                    require(current.read_text() == expected,
+                            "Host file contents differ from the container write")
+
+            def absent(destination):
+                target = "/shared/" + str(destination.relative_to(self.fixture / "shared"))
+                if direction == "host_to_container":
+                    require(self.docker("exec", self.container_id, "test", "!", "-e", target,
+                                        check=False).returncode == 0,
+                            "Deleted or renamed host path remains visible inside the container")
+                else:
+                    require(not destination.exists(), "Deleted or renamed container path remains visible on the host")
+
+            write(path, payloads[0])
+            eventually(lambda: visible(payloads[0]), timeout=15)
+            for operation, value in (("same_length_overwrite", payloads[1]),
+                                     ("atomic_replace", payloads[2]),
+                                     ("rename", payloads[2]),
+                                     ("delete_recreate", payloads[3])):
+                if operation == "atomic_replace":
+                    temporary = current.with_suffix(".new")
+                    write(temporary, value)
+                    move(temporary, current)
+                elif operation == "rename":
+                    previous = current
+                    current = current.with_name("renamed.txt")
+                    move(previous, current)
+                    remote = "/shared/" + str(current.relative_to(self.fixture / "shared"))
+                    eventually(lambda: absent(previous), timeout=15)
+                elif operation == "delete_recreate":
+                    if direction == "host_to_container":
+                        current.unlink()
+                    else:
+                        self.docker("exec", self.container_id, "rm", remote)
+                    eventually(lambda: absent(current), timeout=15)
+                    write(current, value)
+                else:
+                    write(current, value)
+                eventually(lambda: visible(value), timeout=15)
+                emit("file_coherence_" + operation, "passed", direction=direction)
+            final_files.append(current)
+        digests = {}
+        for path in final_files:
+            relative = str(path.relative_to(self.fixture / "shared"))
+            local = hashlib.sha256(path.read_bytes()).hexdigest()
+            remote = self.docker("exec", self.container_id, "sha256sum", "/shared/" + relative).stdout.split()[0]
+            require(local == remote, "Final bind-mount digest differs across the VM boundary")
+            digests[relative] = local
+        emit("file_coherence_final_digests", "passed", sha256=digests,
+             note="File visibility is checked independently of filesystem notifications")
+
+    def port_lifecycle(self):
+        details = json.loads(self.docker("inspect", self.container_id).stdout)[0]
+        require(details["NetworkSettings"]["Ports"]["8080/tcp"] == [
+            {"HostIp": "127.0.0.1", "HostPort": str(self.port)}],
+            "Docker published the fixture outside its requested loopback address")
+        for cycle in range(3):
+            for address in self.non_loopback_addresses:
+                port_closed(address, self.port)
+            self.compose("stop", "--timeout", "10", "web", timeout=30)
+            eventually(lambda: port_closed("127.0.0.1", self.port), timeout=30)
+            self.compose("start", "web", timeout=30)
+            eventually(self.http, timeout=60)
+            emit("localhost_port_close_and_reuse", "passed", cycle=cycle + 1, port=self.port)
+        for address in self.non_loopback_addresses:
+            port_closed(address, self.port)
+        emit("published_port_non_loopback_exposure", "passed" if self.non_loopback_addresses else "not_run",
+             addresses=self.non_loopback_addresses,
+             note="Local IPv4 interface probes; a separate peer and IPv6 require separate checks")
+
+    def dns_and_proxy(self):
+        addresses = {entry[4][0] for entry in socket.getaddrinfo("localhost", None)}
+        require(addresses and all(ipaddress.ip_address(address).is_loopback for address in addresses),
+                "Host localhost DNS resolved outside loopback")
+        emit("host_localhost_dns", "passed", addresses=sorted(addresses))
+        response = self.docker("exec", self.container_id, "wget", "-Y", "off", "-q", "-T", "5",
+                               "-O", "-", "http://web:8080").stdout
+        require(response == self.token, "Compose DNS reached the wrong application")
+        emit("compose_dns_http", "passed")
+        clear_proxy = [argument for name in PROXY_VARIABLES for argument in ("-u", name)]
+        with http_fixture(self.token) as fixture:
+            def url(case):
+                return fixture["origin"] + "/" + self.token + "/" + case
+
+            def route(case, proxied):
+                path = "/" + self.token + "/" + case
+                require(path in fixture["hits"]["origin"], "Request never reached the owned HTTP origin")
+                require((path in fixture["hits"]["proxy"]) == proxied,
+                        "Request used a different proxy route than requested")
+
+            origin = urlsplit(fixture["host_origin"])
+            connection = http.client.HTTPConnection("localhost", origin.port, timeout=3)
+            try:
+                connection.request("GET", "/" + self.token + "/host_direct")
+                response = connection.getresponse()
+                require(response.status == 200 and response.read(4096).decode() == self.token,
+                        "Host localhost DNS reached the wrong HTTP fixture")
+            finally:
+                connection.close()
+            route("host_direct", False)
+            emit("host_localhost_http", "passed")
+            for case, assignments, proxied in (
+                    ("guest_direct", [], False),
+                    ("guest_proxy", ["http_proxy=" + fixture["proxy"]], True),
+                    ("guest_no_proxy", ["http_proxy=" + fixture["proxy"],
+                                        "NO_PROXY=host.docker.internal"], False)):
+                result = self.guest("env", *clear_proxy, *assignments,
+                                    "curl", "--disable", "--fail", "--silent", "--show-error", "--max-time", "10", url(case))
+                require(result.stdout == self.token, "Guest HTTP fixture returned the wrong body")
+                route(case, proxied)
+                emit(case, "passed")
+            for case, proxied in (("container_direct", False), ("container_proxy", True)):
+                variables = {name: "" for name in PROXY_VARIABLES}
+                if proxied:
+                    variables["http_proxy"] = fixture["proxy"]
+                arguments = [argument for name, value in variables.items() for argument in ("--env", name + "=" + value)]
+                result = self.docker("exec", *arguments, self.container_id, "wget", "-Y", "on" if proxied else "off",
+                                     "-q", "-T", "5", "-O", "-", url(case))
+                require(result.stdout == self.token, "Container HTTP fixture returned the wrong body")
+                route(case, proxied)
+                emit(case, "passed")
+            failure = command([self.luhmen, "shell", "env", *clear_proxy,
+                               "http_proxy=" + fixture["proxy"], "curl", "--disable", "--fail", "--silent",
+                               "--show-error", "--max-time", "10", url("failure")], check=False, timeout=20)
+            require(failure.returncode != 0 and "/" + self.token + "/failure" in fixture["hits"]["proxy"]
+                    and "/" + self.token + "/failure" not in fixture["hits"]["origin"],
+                    "Proxy failure was bypassed or reported as success")
+            emit("guest_proxy_failure", "passed")
+            build = self.fixture / "proxy-build"
+            build.mkdir()
+            (build / "Dockerfile").write_text(
+                f"FROM {BASE_IMAGE}\nLABEL {OWNER_LABEL}={self.run_id}\n"
+                f"RUN wget -Y on -q -T 5 -O /proxy-response {url('build_proxy')}\n")
+            arguments = [argument for name in PROXY_VARIABLES for argument in
+                         ("--build-arg", name + "=" + (fixture["proxy"] if name.lower() == "http_proxy" else ""))]
+            self.docker("buildx", "build", "--builder", "luhmen", "--load", "--no-cache", *arguments,
+                        "--tag", self.images[2], str(build), timeout=180)
+            route("build_proxy", True)
+            emit("build_http_proxy", "passed")
+        emit("proxy_scope", "passed", note="Fixture HTTP requests only; registry, HTTPS CONNECT and authentication remain untested")
+
     def buildx(self):
         builder = self.docker("buildx", "inspect", "luhmen").stdout
         require(re.search(r"^Driver:\s+docker\s*$", builder, re.MULTILINE)
@@ -297,14 +577,16 @@ class Suite:
                  ("nested_modify", shared / "nested/modify.txt", "write", True),
                  ("create", shared / "create.txt", "create", False),
                  ("atomic_save", shared / "atomic.txt", "replace", False),
-                 ("delete", shared / "delete.txt", "delete", False)]
+                 ("rename", shared / "rename.txt", "rename", False),
+                 ("delete", shared / "delete.txt", "delete", False),
+                 ("delete_recreate", shared / "recreate.txt", "recreate", False)]
         for name, path, operation, required in cases:
             if operation != "create":
                 path.write_text("before")
             with tempfile.TemporaryFile(dir=self.fixture) as output, tempfile.TemporaryFile(dir=self.fixture) as errors:
                 process = subprocess.Popen(
                     [self.luhmen, "shell", "timeout", "8", "inotifywait", "--monitor", "--recursive",
-                     "--format", "%e|%w%f", "--event", "modify,create,moved_to,delete", str(shared)],
+                     "--format", "%e|%w%f", "--event", "modify,create,moved_to,moved_from,delete", str(shared)],
                     stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
                     start_new_session=True,
                 )
@@ -318,24 +600,46 @@ class Suite:
                         time.sleep(0.1)
                     else:
                         raise RuntimeError("inotifywait did not establish watches")
-                    if operation == "delete":
+                    expected = [(str(path), "MODIFY")]
+                    if operation in ("delete", "recreate"):
                         path.unlink()
+                        expected = [(str(path), "DELETE")]
+                        if operation == "recreate":
+                            path.write_text("after!")
+                            expected.append((str(path), "CREATE"))
                     elif operation == "replace":
                         temporary = path.with_suffix(".new")
-                        temporary.write_text("after")
+                        temporary.write_text("after!")
                         temporary.replace(path)
+                        expected = [(str(path), "MOVED_TO")]
+                    elif operation == "rename":
+                        destination = path.with_suffix(".renamed")
+                        path.rename(destination)
+                        expected = [(str(path), "MOVED_FROM"), (str(destination), "MOVED_TO")]
                     else:
-                        path.write_text("after")
-                    process.wait(timeout=12)
+                        path.write_text("after!")
+                        if operation == "create":
+                            expected = [(str(path), "CREATE")]
+                    require(process.wait(timeout=12) == 124,
+                            "inotifywait failed before its observation timeout")
                     output.seek(0)
                     events = output.read().decode().splitlines()
-                    observed = [event for event in events if event.partition("|")[2] == str(path)]
-                    require(observed or not required, f"No host {name} event reached guest inotify")
-                    emit("watcher_" + name, "passed" if observed else "limitation", events=observed,
-                         note="Host deletion events are an upstream limitation; use polling where events are absent")
+                    paths = {path for path, _ in expected}
+                    observed = [event for event in events if event.partition("|")[2] in paths]
+                    missing = [{"path": target, "event": kind} for target, kind in expected
+                               if not any(event.partition("|")[2] == target
+                                          and kind in event.partition("|")[0].split(",")
+                                          for event in observed)]
+                    require(not missing or not required, f"No host {name} event reached guest inotify")
+                    emit("watcher_" + name, "passed" if not missing else "limitation",
+                         events=observed, missing=missing,
+                         note="Typed notification check; file contents are checked separately. Use application polling for missing events")
                 finally:
                     if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         process.wait(timeout=5)
 
     def cleanup(self):
@@ -373,7 +677,10 @@ def main():
         suite.preflight()
         suite.prepare_fixture()
         suite.workloads()
+        suite.coherence()
+        suite.port_lifecycle()
         suite.buildx()
+        suite.dns_and_proxy()
         if args.watchers:
             suite.watchers()
         else:
@@ -383,9 +690,12 @@ def main():
             suite.recovery()
         else:
             emit("docker_daemon_failure_recovery", "not_run", reason="Pass --recovery to enable")
-        for scenario in ("vpn", "authenticated_proxy", "udp_ports", "ipv6", "sleep_wake"):
+        for scenario in ("vpn", "split_dns", "dns_tcp_fallback", "authenticated_proxy",
+                         "https_connect_proxy", "registry_proxy", "container_no_proxy",
+                         "external_peer_port_exposure", "udp_ports", "ipv6", "sleep_wake"):
             emit(scenario, "not_run", reason="Requires a separate host-specific validation window")
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+    except (OSError, ValueError, KeyError, RuntimeError, http.client.HTTPException,
+            subprocess.SubprocessError, KeyboardInterrupt) as error:
         failure = True
         emit("suite", "failed", error=str(error))
     finally:

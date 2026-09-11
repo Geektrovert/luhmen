@@ -64,6 +64,7 @@ esac
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_luhmen"))
             .args(args)
+            .env("HOME", fs::canonicalize(self.temp.path()).unwrap())
             .env("FIXTURE", self.temp.path())
             .env("LUHMEN_HOME", self.temp.path().join("state"))
             .env("LUHMEN_LIMACTL", self.temp.path().join("limactl"))
@@ -102,6 +103,129 @@ fn inspect_reports_vm_and_engine_health_separately() {
     assert_eq!(report["config"]["memory_gib"], 2);
     assert!(report["vm"].get("config").is_none());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-only-do-not-print"));
+}
+
+#[test]
+fn storage_reports_sparse_files_without_calling_runtime_dependencies() {
+    let fixture = Fixture::new();
+    let disk = fixture.temp.path().join("state/lima/luhmen/disk");
+    let file = fs::OpenOptions::new().write(true).open(&disk).unwrap();
+    file.set_len(1024 * 1024 * 1024).unwrap();
+    let before = fs::metadata(&disk).unwrap();
+    let output = fixture.run(&["storage", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(
+        report["backing_images"][0]["logical_bytes"],
+        1024 * 1024 * 1024
+    );
+    assert_eq!(report["vm_directory"]["complete"], true);
+    assert_eq!(report["shared_lima_cache"]["exists"], false);
+    assert!(!fixture.temp.path().join("lima-calls").exists());
+    assert!(!fixture.temp.path().join("workload-actions").exists());
+    assert_eq!(
+        before.modified().unwrap(),
+        fs::metadata(disk).unwrap().modified().unwrap()
+    );
+}
+
+#[test]
+fn invalid_startup_history_does_not_hide_current_vm_health() {
+    let fixture = Fixture::new();
+    let root = fixture.temp.path();
+    fs::write(root.join("state/lima/luhmen/status"), "Running").unwrap();
+    for history in [b"{invalid".as_slice(), &[b' '; 65537]] {
+        fs::write(root.join("state/last-start.json"), history).unwrap();
+        let output = fixture.run(&["inspect", "--json"]);
+        assert!(output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["state"], "Running");
+        assert_eq!(report["engine_ready"], false);
+        assert!(report["last_start"].is_null());
+        assert!(
+            report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().starts_with("startup diagnostics:"))
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn starting_an_already_running_vm_records_real_socket_confirmation() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new();
+    let root = fs::canonicalize(fixture.temp.path()).unwrap();
+    fs::write(root.join("state/lima/luhmen/status"), "Running").unwrap();
+    fs::create_dir(root.join("state/lima/luhmen/sock")).unwrap();
+    let socket = root.join("state/lima/luhmen/sock/docker.sock");
+    let listener = UnixListener::bind(socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut requests = 0;
+        while requests < 2 && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0; 1024];
+                    assert!(stream.read(&mut request).unwrap() > 0);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                        )
+                        .unwrap();
+                    requests += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+        requests
+    });
+    let output = fixture.run(&["start", "--json"]);
+    assert_eq!(server.join().unwrap(), 2);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["state"], "Running");
+    assert_eq!(report["engine_ready"], true);
+    assert_eq!(report["last_start"]["outcome"], "complete");
+    let stages = report["last_start"]["stages"].as_array().unwrap();
+    assert!(
+        stages
+            .iter()
+            .any(|stage| stage["name"] == "lima_start" && stage["outcome"] == "skipped")
+    );
+    assert!(
+        stages
+            .iter()
+            .any(|stage| stage["name"] == "engine_socket_ready" && stage["outcome"] == "complete")
+    );
+    assert!(!root.join("workload-actions").exists());
+    let later = fixture.run(&["inspect", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&later.stdout).unwrap();
+    assert_eq!(report["last_start"]["outcome"], "complete");
+    assert_eq!(
+        report["engine_ready"], false,
+        "past success must not imply current readiness"
+    );
 }
 
 #[test]
@@ -325,6 +449,13 @@ fn restart_refuses_a_missing_mount_before_stopping_the_running_vm() {
         fs::read(root.join("state/lima/luhmen/disk")).unwrap(),
         b"persistent data"
     );
+    let output = fixture.run(&["inspect", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["last_start"]["operation"], "restart");
+    assert_eq!(report["last_start"]["outcome"], "failed");
+    assert_eq!(report["last_start"]["stages"][0]["name"], "preflight");
+    assert_eq!(report["last_start"]["stages"][0]["outcome"], "failed");
+    assert_eq!(report["state"], "Running");
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

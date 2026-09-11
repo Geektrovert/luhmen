@@ -3,26 +3,28 @@ use std::path::Path;
 use std::time::Duration;
 
 pub fn ping(socket: &Path) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()?;
-    let bytes = runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut stream = tokio::net::UnixStream::connect(socket)
-                .await
-                .context("Docker Engine socket is unavailable")?;
-            stream
-                .write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .await?;
-            let mut bytes = Vec::new();
-            stream.take(8193).read_to_end(&mut bytes).await?;
-            ensure!(bytes.len() <= 8192, "oversized Engine ping response");
-            Ok::<_, anyhow::Error>(bytes)
-        })
-        .await
-        .context("Docker Engine ping exceeded two seconds")?
-    })?;
+        .build()?
+        .block_on(ping_async(socket))
+}
+
+pub async fn ping_async(socket: &Path) -> Result<()> {
+    let bytes = tokio::time::timeout(Duration::from_secs(2), async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::UnixStream::connect(socket)
+            .await
+            .context("Docker Engine socket is unavailable")?;
+        stream
+            .write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await?;
+        let mut bytes = Vec::new();
+        stream.take(8193).read_to_end(&mut bytes).await?;
+        ensure!(bytes.len() <= 8192, "oversized Engine ping response");
+        Ok::<_, anyhow::Error>(bytes)
+    })
+    .await
+    .context("Docker Engine ping exceeded two seconds")??;
     let response = String::from_utf8(bytes)?;
     let (head, body) = response
         .split_once("\r\n\r\n")

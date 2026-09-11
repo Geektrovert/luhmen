@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use luhmen::{
+    cancel::Cancellation,
     config::{self, Config, Mount},
     gateway,
     process::Runner,
@@ -10,10 +11,6 @@ use luhmen::{
 };
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 
 #[derive(Parser)]
 #[command(
@@ -76,6 +73,11 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Report VM disk allocation and shared Lima download-cache usage.
+    Storage {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the saved creation settings.
     Config {
         #[command(subcommand)]
@@ -130,7 +132,7 @@ fn report(inspection: Inspection, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn execute(cli: Cli, cancelled: Arc<AtomicBool>) -> Result<()> {
+fn execute(cli: Cli, cancelled: Cancellation) -> Result<()> {
     let runtime = Runtime {
         state: config::state_path()?,
         runner: Runner {
@@ -188,6 +190,17 @@ fn execute(cli: Cli, cancelled: Arc<AtomicBool>) -> Result<()> {
             );
             Ok(())
         }
+        Action::Storage { json } => {
+            let storage = serde_json::to_value(runtime.storage()?)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&storage)?);
+            } else {
+                for (name, value) in storage.as_object().context("invalid storage report")? {
+                    println!("{name}: {value}");
+                }
+            }
+            Ok(())
+        }
         Action::Config {
             command: ConfigAction::Show,
         } => {
@@ -229,7 +242,7 @@ fn execute(cli: Cli, cancelled: Arc<AtomicBool>) -> Result<()> {
 
 fn main() {
     let cli = Cli::parse();
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Cancellation::new();
     let signal = cancelled.clone();
     std::thread::spawn(move || {
         let result = (|| -> Result<()> {
@@ -245,7 +258,7 @@ fn main() {
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
-            signal.store(true, Ordering::Relaxed);
+            signal.cancel();
             Ok(())
         })();
         if let Err(error) = result {
@@ -254,10 +267,6 @@ fn main() {
     });
     if let Err(error) = execute(cli, cancelled.clone()) {
         eprintln!("luhmen: {error:#}");
-        std::process::exit(if cancelled.load(Ordering::Relaxed) {
-            130
-        } else {
-            1
-        });
+        std::process::exit(if cancelled.is_cancelled() { 130 } else { 1 });
     }
 }

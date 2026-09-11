@@ -26,7 +26,7 @@ jobs:
         run: cargo test --locked
       - name: Check packaging scripts
         run: |
-          python3 -c 'import ast,pathlib; [ast.parse(p.read_text(), filename=str(p)) for p in pathlib.Path("scripts").glob("*.py")]'
+          python3 -c 'import ast,pathlib; [ast.parse(p.read_text(), filename=str(p)) for root in ("scripts", "tests") for p in pathlib.Path(root).glob("*.py")]'
           sh -n scripts/install.sh scripts/install-lima.sh scripts/verify-checkout.sh
           python3 scripts/check-source.py
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'

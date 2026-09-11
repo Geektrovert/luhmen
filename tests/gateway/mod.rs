@@ -7,7 +7,7 @@ use std::time::Instant;
 struct Gateway {
     directory: tempfile::TempDir,
     port: u16,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Cancellation,
     thread: Option<JoinHandle<Result<()>>>,
 }
 
@@ -33,7 +33,7 @@ impl Gateway {
         let mut gateway = Self {
             directory,
             port,
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Cancellation::new(),
             thread: None,
         };
         gateway.start();
@@ -41,7 +41,7 @@ impl Gateway {
     }
 
     fn start(&mut self) {
-        self.shutdown.store(false, Ordering::Relaxed);
+        self.shutdown = Cancellation::new();
         let state_dir = self.directory.path().to_owned();
         let config_path = state_dir.join("gateway.json");
         let shutdown = self.shutdown.clone();
@@ -65,7 +65,7 @@ impl Gateway {
     }
 
     fn stop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.cancel();
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap().unwrap();
         }
@@ -75,20 +75,11 @@ impl Gateway {
         &self,
         hostname: &'static str,
     ) -> rustls::StreamOwned<rustls::ClientConnection, StdStream> {
-        let pem = fs::read(self.directory.path().join("gateway-ca/ca.pem")).unwrap();
-        let mut roots = rustls::RootCertStore::empty();
-        for certificate in rustls_pemfile::certs(&mut pem.as_slice()) {
-            roots.add(certificate.unwrap()).unwrap();
-        }
-        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let connection =
-            rustls::ClientConnection::new(Arc::new(config), hostname.try_into().unwrap()).unwrap();
+        let connection = rustls::ClientConnection::new(
+            client_config(self.directory.path()),
+            hostname.try_into().unwrap(),
+        )
+        .unwrap();
         let stream = StdStream::connect((Ipv4Addr::LOCALHOST, self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -110,6 +101,23 @@ impl Gateway {
             });
         response
     }
+}
+
+fn client_config(state_dir: &Path) -> Arc<rustls::ClientConfig> {
+    let pem = fs::read(state_dir.join("gateway-ca/ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in rustls_pemfile::certs(&mut pem.as_slice()) {
+        roots.add(certificate.unwrap()).unwrap();
+    }
+    Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    )
 }
 
 impl Drop for Gateway {
@@ -345,10 +353,131 @@ fn one_daemon_owns_a_state_directory_and_shutdown_releases_the_lock() {
     let error = run(
         gateway.directory.path(),
         &gateway.directory.path().join("gateway.json"),
-        Arc::new(AtomicBool::new(false)),
+        Cancellation::new(),
     )
     .unwrap_err();
     assert!(error.to_string().contains("another luhmen gateway"));
     gateway.stop();
     gateway.start();
+}
+
+#[test]
+fn slow_uploads_reject_overload_and_release_capacity_on_completion() {
+    let (port, upstream) = upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    let gateway = Gateway::new(port);
+    let mut uploads = Vec::new();
+    for _ in 0..MAX_BUFFERED_EXCHANGES {
+        let mut stream = gateway.tls("app.localhost");
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: app.localhost:{}\r\nContent-Length: 1\r\nExpect: 100-continue\r\n\r\n",
+            gateway.port
+        )
+        .unwrap();
+        // Continue is sent only after the handler starts reading the body.
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+            assert!(headers.len() < 1024);
+        }
+        assert!(headers.starts_with(b"HTTP/1.1 100"));
+        uploads.push(stream);
+    }
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: app.localhost:{}\r\n\r\n",
+        gateway.port
+    );
+    let rejected = gateway.request("app.localhost", &request);
+    assert!(rejected.starts_with("HTTP/1.1 503"), "{rejected}");
+
+    let mut completed = uploads.pop().unwrap();
+    completed.write_all(b"x").unwrap();
+    let mut reply = String::new();
+    completed.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(upstream.join().unwrap().ends_with('x'));
+
+    // The upstream is now gone. A 502 proves the next request was admitted and
+    // attempted a connection, rather than remaining stuck at the buffer limit.
+    let admitted = gateway.request("app.localhost", &request);
+    assert!(admitted.starts_with("HTTP/1.1 502"), "{admitted}");
+    drop(uploads);
+}
+
+#[tokio::test]
+async fn slow_response_writes_hold_reservations_until_disconnect() {
+    use tokio::io::AsyncReadExt;
+
+    let (port, upstream) = upstream(format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+        MAX_BODY_BYTES,
+        "x".repeat(MAX_BODY_BYTES)
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    let config = Arc::new(Config {
+        listen_port: 8443,
+        routes: BTreeMap::from([("app.localhost".to_owned(), port)]),
+    });
+    let acceptor = TlsAcceptor::from(Arc::new(
+        tls_config(directory.path(), &config.routes).unwrap(),
+    ));
+    let connector = tokio_rustls::TlsConnector::from(client_config(directory.path()));
+    let buffers = Arc::new(Semaphore::new(1));
+    // A bounded transport gives deterministic write backpressure. The same TLS
+    // handshake, HTTP connection, forwarding, and budget code run for TCP.
+    let (client, server) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server,
+        acceptor.clone(),
+        config.clone(),
+        buffers.clone(),
+    ));
+    let mut slow = connector
+        .connect("app.localhost".try_into().unwrap(), client)
+        .await
+        .unwrap();
+    let request = b"GET / HTTP/1.1\r\nHost: app.localhost:8443\r\n\r\n";
+    slow.write_all(request).await.unwrap();
+    timeout(Duration::from_secs(5), slow.read_exact(&mut [0]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(buffers.available_permits(), 0);
+    assert!(!server.is_finished());
+
+    let (client, extra_server) = tokio::io::duplex(1024);
+    let extra_server = tokio::spawn(serve_connection(
+        extra_server,
+        acceptor,
+        config,
+        buffers.clone(),
+    ));
+    let mut extra = connector
+        .connect("app.localhost".try_into().unwrap(), client)
+        .await
+        .unwrap();
+    extra.write_all(request).await.unwrap();
+    let mut reply = Vec::new();
+    timeout(Duration::from_secs(5), extra.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.starts_with(b"HTTP/1.1 503"));
+    extra_server.await.unwrap();
+    assert_eq!(buffers.available_permits(), 0);
+
+    drop(slow);
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+    let released = timeout(Duration::from_secs(5), buffers.acquire())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(released);
+    assert_eq!(buffers.available_permits(), 1);
+    upstream.join().unwrap();
 }

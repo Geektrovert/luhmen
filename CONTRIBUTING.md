@@ -25,7 +25,7 @@ Changes to provisioning, mounts, networking, or lifecycle need checks on Apple S
 python3 tests/vm-smoke.py --run --fixture-root /absolute/path/to/shared-fixtures --watchers --recovery
 ```
 
-The suite builds and runs Compose workloads and checks Buildx, bind-mount visibility, named-volume persistence, and localhost HTTP access. It restarts the VM. `--watchers` installs guest `inotify-tools` and checks filesystem events; `--recovery` kills Docker Engine to check service recovery.
+The suite builds and runs Compose workloads, checks Buildx, file visibility in both directions, named-volume persistence, DNS, localhost port reuse, and basic HTTP proxies. It restarts the VM. `--watchers` installs guest `inotify-tools` and checks filesystem events; `--recovery` kills Docker Engine to check service recovery.
 
 Cleanup removes the suite's containers, volumes, networks, and image tags. Fixture files, downloaded base images, and build cache remain. The suite checks the context endpoint before each Docker command and refuses pre-existing containers.
 

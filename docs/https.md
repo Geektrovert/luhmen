@@ -49,9 +49,12 @@ The proxy supports buffered HTTP/1 exchanges. WebSockets, CONNECT tunnels, strea
 | --- | --- |
 | Routes | 32 |
 | Simultaneous connections | 32 |
+| Active buffered exchanges | 4 |
 | Request or response body | 8 MiB each |
 | TLS handshake timeout | 5 seconds |
 | Exchange timeout | 30 seconds |
+
+An exchange occupies its slot until the connection finishes, including writes to slow clients. When all four slots are occupied, new requests receive HTTP 503. Each slot reserves 32 MiB of body-buffer capacity. The 128 MiB total excludes headers, TLS, sockets, and runtime overhead.
 
 TLS server names and HTTP `Host` headers must match the same configured route. Unknown TLS names fail the handshake. Upstream connections use loopback directly and ignore host HTTP proxy environment variables.
 

@@ -1,8 +1,9 @@
 //! A loopback HTTPS gateway for explicitly configured `.localhost` applications.
 
+use crate::cancel::Cancellation;
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue};
 use hyper::service::service_fn;
@@ -20,12 +21,11 @@ use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -33,10 +33,16 @@ use tokio_rustls::TlsAcceptor;
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 32;
+// Each exchange reserves space for both bodies and temporary copies made while
+// growing their buffers. Transport buffers and headers are separate.
+const EXCHANGE_BUFFER_BYTES: usize = 4 * MAX_BODY_BYTES;
+const BUFFER_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+const MAX_BUFFERED_EXCHANGES: usize = BUFFER_BUDGET_BYTES / EXCHANGE_BUFFER_BYTES;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type HttpResponse = Response<Full<Bytes>>;
+type Reservation = Arc<OnceLock<OwnedSemaphorePermit>>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -238,7 +244,7 @@ fn tls_config(state_dir: &Path, routes: &BTreeMap<String, u16>) -> Result<rustls
 /// Run the HTTPS gateway until shutdown is set. Configuration loads once at startup.
 /// Shutdown stops accepting connections, allows five seconds to drain, then cancels
 /// remaining work. Neither upstream applications nor CA files are removed.
-pub fn run(state_dir: &Path, config_path: &Path, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn run(state_dir: &Path, config_path: &Path, shutdown: Cancellation) -> Result<()> {
     let config = Config::read(config_path)?;
     let tls = tls_config(state_dir, &config.routes)?;
     let lock_path = state_dir.join("gateway.lock");
@@ -263,7 +269,7 @@ pub fn run(state_dir: &Path, config_path: &Path, shutdown: Arc<AtomicBool>) -> R
         .block_on(serve(config, tls, shutdown))
 }
 
-async fn serve(config: Config, tls: rustls::ServerConfig, shutdown: Arc<AtomicBool>) -> Result<()> {
+async fn serve(config: Config, tls: rustls::ServerConfig, shutdown: Cancellation) -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.listen_port))
         .await
         .with_context(|| format!("bind gateway to 127.0.0.1:{}", config.listen_port))?;
@@ -274,35 +280,22 @@ async fn serve(config: Config, tls: rustls::ServerConfig, shutdown: Arc<AtomicBo
     let config = Arc::new(config);
     let acceptor = TlsAcceptor::from(Arc::new(tls));
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let buffers = Arc::new(Semaphore::new(MAX_BUFFERED_EXCHANGES));
     let mut connections = JoinSet::new();
-    let mut poll = tokio::time::interval(Duration::from_millis(100));
-    while !shutdown.load(Ordering::Relaxed) {
+    loop {
         tokio::select! {
-            _ = poll.tick() => {}
+            biased;
+            _ = shutdown.cancelled() => break,
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept gateway connection")?;
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue };
                 let acceptor = acceptor.clone();
                 let config = config.clone();
+                let buffers = buffers.clone();
                 connections.spawn(async move {
                     let _permit = permit;
-                    let Ok(Ok(tls)) = timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await else { return };
-                    let Some(sni) = tls.get_ref().1.server_name().map(str::to_owned) else { return };
-                    let service = service_fn(move |request| handle(request, sni.clone(), config.clone()));
-                    let mut http = hyper::server::conn::http1::Builder::new();
-                    http.keep_alive(false)
-                        .max_headers(64)
-                        .max_buf_size(32 * 1024)
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(HANDSHAKE_TIMEOUT);
-                    // Includes client response writes so a client cannot retain a slot forever.
-                    let connection = http.serve_connection(TokioIo::new(tls), service);
-                    if let Ok(Ok(mut parts)) = timeout(EXCHANGE_TIMEOUT + HANDSHAKE_TIMEOUT, connection.without_shutdown()).await {
-                        // An upgrade request makes Hyper yield ownership of the transport,
-                        // even when our response refuses the upgrade. Close TLS explicitly.
-                        let _ = timeout(HANDSHAKE_TIMEOUT, parts.io.inner_mut().shutdown()).await;
-                    }
+                    serve_connection(stream, acceptor, config, buffers).await;
                 });
             }
         }
@@ -320,12 +313,73 @@ async fn serve(config: Config, tls: rustls::ServerConfig, shutdown: Arc<AtomicBo
     Ok(())
 }
 
+async fn serve_connection<IO>(
+    stream: IO,
+    acceptor: TlsAcceptor,
+    config: Arc<Config>,
+    buffers: Arc<Semaphore>,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(Ok(tls)) = timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await else {
+        return;
+    };
+    let Some(sni) = tls.get_ref().1.server_name().map(str::to_owned) else {
+        return;
+    };
+    let reservation = Arc::new(OnceLock::new());
+    let service_reservation = reservation.clone();
+    let service = service_fn(move |request| {
+        handle(
+            request,
+            sni.clone(),
+            config.clone(),
+            buffers.clone(),
+            service_reservation.clone(),
+        )
+    });
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.keep_alive(false)
+        .max_headers(64)
+        .max_buf_size(32 * 1024)
+        .timer(TokioTimer::new())
+        .header_read_timeout(HANDSHAKE_TIMEOUT);
+    // The reservation belongs to the connection, not the response body. Hyper can
+    // drop a body before TLS finishes writing its bytes to a slow client.
+    let connection = http.serve_connection(TokioIo::new(tls), service);
+    if let Ok(Ok(mut parts)) = timeout(
+        EXCHANGE_TIMEOUT + HANDSHAKE_TIMEOUT,
+        connection.without_shutdown(),
+    )
+    .await
+    {
+        // Hyper yields the transport for upgrade requests even when refused.
+        let _ = timeout(HANDSHAKE_TIMEOUT, parts.io.inner_mut().shutdown()).await;
+    }
+    drop(reservation);
+}
+
 async fn handle(
     request: Request<Incoming>,
     sni: String,
     config: Arc<Config>,
+    buffers: Arc<Semaphore>,
+    reservation: Reservation,
 ) -> Result<HttpResponse, Infallible> {
-    let response = match timeout(EXCHANGE_TIMEOUT, forward(request, &sni, &config)).await {
+    // There is one exchange per connection because keep-alive is disabled.
+    let Ok(permit) = buffers.try_acquire_owned() else {
+        return Ok(response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway buffer capacity is busy; retry when requests complete\n",
+        ));
+    };
+    let _ = reservation.set(permit);
+    let response = match timeout(
+        EXCHANGE_TIMEOUT,
+        forward(request, &sni, &config, reservation),
+    )
+    .await
+    {
         Ok(response) => response,
         Err(_) => response(
             StatusCode::GATEWAY_TIMEOUT,
@@ -335,7 +389,12 @@ async fn handle(
     Ok(response)
 }
 
-async fn forward(request: Request<Incoming>, sni: &str, config: &Config) -> HttpResponse {
+async fn forward(
+    request: Request<Incoming>,
+    sni: &str,
+    config: &Config,
+    reservation: Reservation,
+) -> HttpResponse {
     if request.method() == Method::CONNECT || request.headers().contains_key("upgrade") {
         return response(
             StatusCode::NOT_IMPLEMENTED,
@@ -362,8 +421,8 @@ async fn forward(request: Request<Incoming>, sni: &str, config: &Config) -> Http
     };
     let is_head = request.method() == Method::HEAD;
     let (mut parts, body) = request.into_parts();
-    let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
-        Ok(body) => body.to_bytes(),
+    let body = match collect_body(body).await {
+        Ok(body) => body,
         Err(_) => {
             return response(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -390,7 +449,7 @@ async fn forward(request: Request<Incoming>, sni: &str, config: &Config) -> Http
         .headers
         .insert(CONNECTION, HeaderValue::from_static("close"));
     let request = Request::from_parts(parts, Full::new(body));
-    match exchange(port, request, is_head).await {
+    match exchange(port, request, is_head, reservation).await {
         Ok(response) => response,
         Err(error) => {
             eprintln!("luhmen gateway upstream 127.0.0.1:{port} failed: {error:#}");
@@ -452,13 +511,23 @@ impl Drop for AbortOnDrop {
     }
 }
 
-async fn exchange(port: u16, request: Request<Full<Bytes>>, is_head: bool) -> Result<HttpResponse> {
+async fn exchange(
+    port: u16,
+    request: Request<Full<Bytes>>,
+    is_head: bool,
+    reservation: Reservation,
+) -> Result<HttpResponse> {
     let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
         .await
         .context("connect to upstream")?;
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-    let connection = tokio::spawn(connection);
+    let connection = tokio::spawn(async move {
+        // Aborting a task schedules its destruction. Keep the reservation until
+        // its future and any retained request bytes have actually been dropped.
+        let _reservation = reservation;
+        connection.await
+    });
     let _cancel = AbortOnDrop(connection.abort_handle());
     let response = sender
         .send_request(request)
@@ -468,11 +537,7 @@ async fn exchange(port: u16, request: Request<Full<Bytes>>, is_head: bool) -> Re
         bail!("upstream protocol upgrades are not supported");
     }
     let (mut parts, body) = response.into_parts();
-    let body = Limited::new(body, MAX_BODY_BYTES)
-        .collect()
-        .await
-        .map_err(|error| anyhow::anyhow!("read upstream body: {error}"))?
-        .to_bytes();
+    let body = collect_body(body).await.context("read upstream body")?;
     strip_hop_headers(&mut parts.headers);
     if !is_head && parts.status != StatusCode::NOT_MODIFIED {
         parts.headers.remove(CONTENT_LENGTH);
@@ -481,6 +546,34 @@ async fn exchange(port: u16, request: Request<Full<Bytes>>, is_head: bool) -> Re
         .headers
         .insert(CONNECTION, HeaderValue::from_static("close"));
     Ok(Response::from_parts(parts, Full::new(body)))
+}
+
+async fn collect_body(mut body: Incoming) -> Result<Bytes> {
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Ok(chunk) = frame.context("read body frame")?.into_data() else {
+            continue;
+        };
+        ensure!(
+            chunk.len() <= MAX_BODY_BYTES - bytes.len(),
+            "body exceeds 8 MiB"
+        );
+        let required = bytes.len() + chunk.len();
+        if required > bytes.capacity() {
+            // Keep one buffer instead of retaining metadata for every tiny chunk.
+            // Explicit growth also prevents a late frame from doubling capacity
+            // past the body limit. Bytes takes ownership without another copy.
+            let capacity = (bytes.capacity() * 2)
+                .max(4096)
+                .max(required)
+                .min(MAX_BODY_BYTES);
+            bytes
+                .try_reserve_exact(capacity - bytes.len())
+                .context("allocate body buffer")?;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(bytes))
 }
 
 fn response(status: StatusCode, message: &'static str) -> HttpResponse {

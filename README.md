@@ -33,13 +33,14 @@ Images, containers, and named volumes persist across VM stops and restarts. luhm
 
 ```sh
 luhmen inspect --json
+luhmen storage --json
 luhmen docker compose up -d
 luhmen docker buildx build --load -t my-app .
 luhmen restart
 luhmen stop
 ```
 
-`luhmen create --dry-run` prints the VM configuration without creating state. See [runtime behavior](docs/runtime.md) for configuration, mounts, ports, and recovery; and [local HTTPS](docs/https.md) for domains and certificates.
+`luhmen create --dry-run` prints the VM configuration without creating state. See [runtime behavior](docs/runtime.md) for configuration, mounts, ports, and recovery; [storage](docs/storage.md) for disk usage; and [local HTTPS](docs/https.md) for domains and certificates.
 
 ## Build and contribute
 

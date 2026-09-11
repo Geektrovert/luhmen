@@ -1,6 +1,6 @@
 use crate::config::{self, Config, LIMA_VERSION, NAME};
-use crate::engine;
 use crate::process::Runner;
+use crate::{engine, startup, storage};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::Serialize;
@@ -9,8 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const CONTEXT_DESCRIPTION: &str = "luhmen managed Docker Engine (schema 1)";
 const SHORT: Duration = Duration::from_secs(20);
@@ -33,6 +32,7 @@ pub struct Inspection {
     pub config: Option<Config>,
     pub vm: Option<Value>,
     pub errors: Vec<String>,
+    pub last_start: Option<startup::Report>,
 }
 
 impl Runtime {
@@ -350,26 +350,18 @@ impl Runtime {
         self.check_host()?;
         config::ensure_owned(&self.state, false)?;
         let _lock = self.lock()?;
-        self.start_locked()?;
+        self.start_locked(false)?;
         self.inspect()
     }
 
-    fn start_locked(&self) -> Result<()> {
-        self.check_lima()?;
-        let config = self.config()?;
-        config.validate(&self.state)?;
-        self.check_resources(&config)?;
-        self.ensure_context()?;
-        let vm = self
-            .vm()?
-            .context("VM is missing; run `luhmen create` with the saved configuration")?;
-        match vm.get("status").and_then(Value::as_str).unwrap_or("") {
-            "Running" => {}
-            "Stopped" => {
-                ensure!(
-                    fs2::available_space(&self.state)? >= 2 * 1024 * 1024 * 1024,
-                    "at least 2 GiB of free host storage is required to start the VM"
-                );
+    fn start_locked(&self, restart: bool) -> Result<()> {
+        let mut trace = startup::Trace::new(&self.state, if restart { "restart" } else { "start" });
+        let running = trace.stage("preflight", || self.start_preflight(restart))?;
+        if restart && running {
+            trace.stage("lima_stop", || self.stop_locked(false))?;
+        }
+        if !running || restart {
+            trace.stage("lima_start", || {
                 eprintln!("Starting the luhmen VM and waiting for Docker Engine.");
                 self.runner
                     .run(
@@ -378,28 +370,58 @@ impl Runtime {
                         START_TIMEOUT,
                     )?
                     .success("VM start")?;
-            }
+                Ok(())
+            })?;
+        } else {
+            trace.skip("lima_start");
+        }
+        trace.stage("engine_socket_ready", || self.wait_for_engine())?;
+        trace.complete();
+        Ok(())
+    }
+
+    fn start_preflight(&self, restart: bool) -> Result<bool> {
+        self.check_lima()?;
+        let config = self.config()?;
+        config.validate(&self.state)?;
+        self.check_resources(&config)?;
+        self.ensure_context()?;
+        let vm = self
+            .vm()?
+            .context("VM is missing; run `luhmen create` with the saved configuration")?;
+        let running = match vm.get("status").and_then(Value::as_str).unwrap_or("") {
+            "Running" => true,
+            "Stopped" => false,
             status => bail!(
                 "VM state is {status:?}; inspect the Lima logs, then use `luhmen stop --force` to recover before retrying"
             ),
-        }
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            match engine::ping(&self.socket()) {
-                Ok(()) => return Ok(()),
-                Err(error) if Instant::now() >= deadline => {
-                    return Err(error).context(
-                        "Docker Engine did not become ready within 120 seconds; VM is preserved",
-                    );
-                }
-                Err(_) => {}
-            }
+        };
+        if !running || restart {
             ensure!(
-                !self.runner.cancelled.load(Ordering::Relaxed),
-                "readiness cancelled; the VM may still be running; run `luhmen inspect`"
+                fs2::available_space(&self.state)? >= 2 * 1024 * 1024 * 1024,
+                "at least 2 GiB of free host storage is required to start or restart the VM"
             );
-            std::thread::sleep(Duration::from_millis(250));
         }
+        Ok(running)
+    }
+
+    fn wait_for_engine(&self) -> Result<()> {
+        tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+            let socket = self.socket();
+            let ready = async {
+                loop {
+                    if engine::ping_async(&socket).await.is_ok() { return; }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            };
+            tokio::select! {
+                _ = self.runner.cancelled.cancelled() => bail!("readiness cancelled; the VM may still be running; run `luhmen inspect`"),
+                result = tokio::time::timeout(Duration::from_secs(120), ready) => {
+                    result.context("Docker Engine did not become ready within 120 seconds; VM is preserved")?;
+                    Ok(())
+                }
+            }
+        })
     }
 
     fn stop_locked(&self, force: bool) -> Result<()> {
@@ -444,16 +466,7 @@ impl Runtime {
         self.check_host()?;
         config::ensure_owned(&self.state, false)?;
         let _lock = self.lock()?;
-        self.check_lima()?;
-        self.config()?.validate(&self.state)?;
-        self.check_resources(&self.config()?)?;
-        self.context_ready()?;
-        ensure!(
-            fs2::available_space(&self.state)? >= 2 * 1024 * 1024 * 1024,
-            "at least 2 GiB of free host storage is required to restart the VM"
-        );
-        self.stop_locked(false)?;
-        self.start_locked()?;
+        self.start_locked(true)?;
         self.inspect()
     }
 
@@ -502,6 +515,17 @@ impl Runtime {
                 false
             }
         };
+        let last_start = if self.state.exists() {
+            match startup::read(&self.state) {
+                Ok(report) => report,
+                Err(error) => {
+                    errors.push(format!("startup diagnostics: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Inspection {
             schema_version: 1,
             name: NAME,
@@ -513,7 +537,14 @@ impl Runtime {
             config,
             vm,
             errors,
+            last_start,
         })
+    }
+
+    pub fn storage(&self) -> Result<storage::Report> {
+        config::ensure_owned(&self.state, false)?;
+        self.check_state_paths()?;
+        Ok(storage::inspect(&self.state))
     }
 
     pub fn doctor(&self) -> Result<Value> {

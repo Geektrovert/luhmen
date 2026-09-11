@@ -42,6 +42,10 @@ VirtioFS carries file contents between the Mac and VM. Lima's experimental `moun
 
 `start` waits for Docker Engine to answer through the host socket before reporting success. `inspect --json` reports VM state, configured resources, `engine_ready`, `context_ready`, and errors. A missing shared directory does not prevent inspection or shutdown. `doctor` checks host dependencies without starting workloads.
 
+Start and restart print elapsed milliseconds for `preflight`, `lima_start`, and `engine_socket_ready` to stderr. Restart also measures `lima_stop` when needed. `lima_start` includes boot, provisioning, and Lima's guest readiness probe; `engine_socket_ready` checks the host socket afterward.
+
+`inspect --json` includes the saved attempt under `last_start`, with stages marked `running`, `complete`, `failed`, or `skipped`. An interrupted command can leave a stage marked `running`. Report write failures produce warnings; invalid reports appear in inspection errors. Use live readiness fields to check current health.
+
 `stop` requests a graceful guest shutdown. `restart` stops and starts the same VM. Docker restart policies determine which containers resume. The VM disk persists in both cases.
 
 Only one lifecycle command can run at a time. Cancellation and deadlines terminate the temporary command and its helpers, while Lima's detached VM process can remain running. Inspect the VM before retrying. After interrupted creation, rerun `create` with the same settings if the VM is missing, or `start` if it exists.
@@ -74,6 +78,8 @@ Local HTTPS uses a separate proxy in front of explicitly configured localhost po
 Start with `luhmen inspect --json` and `luhmen doctor --json`. Check free disk space and logs under the state directory after provisioning or boot failures. Correct missing dependencies or network problems, then retry `start`.
 
 Use `stop` before repairing Lima configuration or copying the disk for backup. `stop --force` can terminate a stuck VM, but may lose unwritten guest data and cannot repair configuration. Do not delete the VM disk to recover from a startup error.
+
+`luhmen storage --json` reports logical and allocated bytes for VM files and Lima's shared cache. See [storage](storage.md) for accounting limits and cache placement.
 
 `luhmen shell COMMAND...` runs a guest command, for example `luhmen shell uname -a`.
 

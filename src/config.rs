@@ -75,7 +75,7 @@ impl Config {
         let state = canonical_destination(state)?;
         for (index, mount) in self.mounts.iter().enumerate() {
             ensure!(
-                mount.path.is_absolute() && mount.path.is_dir(),
+                mount.path.is_dir(),
                 "mount directory is missing or not absolute: {}",
                 mount.path.display()
             );

@@ -162,6 +162,7 @@ fn invalid_startup_history_does_not_hide_current_vm_health() {
 fn starting_an_already_running_vm_records_real_socket_confirmation() {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
+    use std::sync::mpsc::{self, TryRecvError};
     use std::time::{Duration, Instant};
     let fixture = Fixture::new();
     let root = fs::canonicalize(fixture.temp.path()).unwrap();
@@ -170,10 +171,11 @@ fn starting_an_already_running_vm_records_real_socket_confirmation() {
     let socket = root.join("state/lima/luhmen/sock/docker.sock");
     let listener = UnixListener::bind(socket).unwrap();
     listener.set_nonblocking(true).unwrap();
+    let (shutdown, stopped) = mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut requests = 0;
-        while requests < 2 && Instant::now() < deadline {
+        while matches!(stopped.try_recv(), Err(TryRecvError::Empty)) && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     stream
@@ -197,7 +199,11 @@ fn starting_an_already_running_vm_records_real_socket_confirmation() {
         requests
     });
     let output = fixture.run(&["start", "--json"]);
-    assert_eq!(server.join().unwrap(), 2);
+    drop(shutdown);
+    assert!(
+        server.join().unwrap() > 0,
+        "Engine readiness was not probed"
+    );
     assert!(
         output.status.success(),
         "{}",

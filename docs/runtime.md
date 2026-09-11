@@ -22,6 +22,8 @@ Free-space checks do not reserve disk capacity. `luhmen create --dry-run` valida
 
 Creation tries Canonical's Ubuntu image server first and the [Nanjing University mirror](https://mirrors.nju.edu.cn/ubuntu-cloud-images/) if that download fails. Both URLs require the same pinned SHA-256 digest. A failed primary connection can add about 30 seconds before Lima tries the mirror. If both fail, inspect the reported download errors and retry after restoring network access.
 
+The pinned Ubuntu image contains systemd `255.4-1ubuntu8.17`, which lacks an [upstream login-service fix](https://github.com/systemd/systemd/pull/36364). An exited session can leave `systemd-logind` spinning and delay provisioning. Before Lima's login setup, luhmen adds a syscall restriction to that service so it uses numeric PID and session FIFO tracking. Its existing syscall restrictions remain in place, but logind loses pidfd-based protection against PID reuse. Docker's process tracking is unaffected. The workaround applies only to that exact systemd package version and removes its own configuration if the version changes.
+
 The stored configuration uses this format:
 
 ```json

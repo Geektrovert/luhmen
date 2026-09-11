@@ -68,6 +68,7 @@ pub fn render(config: &Config) -> Result<String> {
             { "guestIP": "127.0.0.1", "guestPortRange": [1, 65535], "hostIP": "127.0.0.1", "hostPortRange": [1, 65535], "proto": "any" }
         ],
         "provision": [
+            { "mode": "boot", "script": SYSTEMD_LOGIND_COMPAT },
             { "mode": "dependency", "skipDefaultDependencyResolution": false, "script": dependencies },
             { "mode": "data", "path": "/etc/docker/daemon.json", "content": "{\"data-root\":\"/var/lib/docker\",\"log-driver\":\"local\",\"live-restore\":true,\"features\":{\"containerd-snapshotter\":true}}\n", "owner": "root:root", "permissions": "0600" },
             { "mode": "data", "path": "/etc/systemd/system/docker.socket", "content": DOCKER_SOCKET, "owner": "root:root", "permissions": "0644" },
@@ -83,6 +84,28 @@ pub fn render(config: &Config) -> Result<String> {
     });
     serde_json::to_string_pretty(&document).context("serialize VM configuration")
 }
+
+// Ubuntu's pinned package lacks https://github.com/systemd/systemd/pull/36364.
+// A dead session pidfd can spin logind and stall Lima's early login setup.
+// Keep the existing syscall allowlist; EPERM selects logind's FIFO fallback.
+// This loses pidfd-based PID reuse protection in logind, not in Docker.
+const SYSTEMD_LOGIND_COMPAT: &str = r#"#!/bin/sh
+set -eu
+dropin=/etc/systemd/system/systemd-logind.service.d/50-luhmen-session-tracking.conf
+if [ "$(dpkg-query -W -f='${Version}' systemd)" = "255.4-1ubuntu8.17" ]; then
+    install -d -m 0755 "${dropin%/*}"
+    cat > "$dropin" <<'SERVICE'
+[Service]
+SystemCallFilter=~pidfd_open
+SERVICE
+elif [ -f "$dropin" ]; then
+    rm -f "$dropin"
+else
+    exit 0
+fi
+systemctl daemon-reload
+systemctl try-restart systemd-logind.service
+"#;
 
 // This stage runs before Lima installs its own guest prerequisites.
 const DEPENDENCIES: &str = r#"#!/bin/sh

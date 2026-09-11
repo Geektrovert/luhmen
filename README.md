@@ -7,23 +7,21 @@ This is a development preview for local development. Expect CLI and configuratio
 ## Requirements
 
 - An Apple Silicon Mac with macOS 14 or newer.
-- Rust 1.95.0 through [rustup](https://rustup.rs/), Apple's Command Line Tools, and Python 3.11 or newer to build from source.
-- Lima 2.2.0 and Docker CLI with Compose and Buildx plugins. See [installation](docs/install.md).
+- [Homebrew](https://brew.sh/) for the recommended installation. It installs the prebuilt CLI, pinned Lima runtime, and Docker client tools.
 - At least 15 GiB of free disk space to create the VM.
 - Internet access for VM creation, first-start guest packages, and container images.
 
 ## Install and start
 
-For prebuilt macOS arm64 packages, see [GitHub Releases](https://github.com/Geektrovert/luhmen/releases) and the [archive installation instructions](docs/install.md#release-archives).
-
-Install Rust, Python, and the [Docker client and plugins](docs/install.md#docker-client-and-plugins) first. Then clone and build:
+Install from the tap. No Rust build is needed:
 
 ```sh
-git clone https://github.com/Geektrovert/luhmen.git
-cd luhmen
-./scripts/install-lima.sh --prefix "$HOME/.local/opt/luhmen-lima"
-export PATH="$HOME/.local/opt/luhmen-lima/bin:$HOME/.local/bin:$PATH"
-./scripts/install.sh --prefix "$HOME/.local"
+brew install Geektrovert/tap/luhmen
+```
+
+Follow the [one-time Docker plugin setup](docs/install.md#homebrew), then start the VM:
+
+```sh
 luhmen doctor
 mkdir -p "$HOME/projects"
 luhmen create --cpus 4 --memory 4 --disk 30 --mount "$HOME/projects:rw"
@@ -31,7 +29,9 @@ luhmen start
 luhmen docker run --rm hello-world
 ```
 
-The last command should print `Hello from Docker!`. The first create and start download the guest image and packages and can take several minutes. If `doctor` fails, fix the reported dependency before creating the VM. The `export` above applies to the current terminal; add it to your shell configuration to use the same installation in new terminals.
+The last command should print `Hello from Docker!`. The first create and start download the guest image and packages and can take several minutes. If `doctor` fails, fix the reported dependency before creating the VM.
+
+For other installation methods, see [release archives](docs/install.md#release-archives) or [building from source](docs/install.md#build-from-source).
 
 Replace `$HOME/projects` with the directory you want to share, or omit `--mount` if you do not need host files. Mounts are read-only unless suffixed with `:rw`. Choose resources and mounts before creation; these settings cannot be changed afterward. Memory and disk arguments use GiB.
 
@@ -58,6 +58,8 @@ luhmen stop
 See [troubleshooting](docs/runtime.md#recovery-and-diagnostics) for common failures. Report bugs and propose changes through [GitHub issues](https://github.com/Geektrovert/luhmen/issues). Report vulnerabilities according to the [security policy](SECURITY.md).
 
 ## Build and contribute
+
+Source builds require Rust 1.95.0 through [rustup](https://rustup.rs/), Apple's Command Line Tools, and Python 3.11 or newer. See [source installation](docs/install.md#build-from-source).
 
 Run these checks from a source checkout. Binary release archives do not contain the build scripts or Rust source.
 

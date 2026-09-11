@@ -1,17 +1,57 @@
 # Installation
 
+## Homebrew
+
+On an Apple Silicon Mac running macOS 14 or newer:
+
+```sh
+brew install Geektrovert/tap/luhmen
+```
+
+The [tap](https://github.com/Geektrovert/homebrew-tap) downloads the published luhmen binary and a checksum-pinned Lima 2.2.0 distribution. No Rust build is needed. Lima stays inside luhmen's Homebrew installation, so another Lima installation or upgrade does not change its runtime. `LUHMEN_LIMACTL` still overrides that default when explicitly set.
+
+Homebrew also installs Docker CLI, Compose, and Buildx. The luhmen wrapper selects Homebrew's Docker CLI unless `LUHMEN_DOCKER` is explicitly set. Docker needs one configuration change to discover Homebrew's plugins. Run `brew --prefix` to find the Homebrew prefix, then add its `lib/docker/cli-plugins` directory to `cliPluginsExtraDirs` in `${DOCKER_CONFIG:-$HOME/.docker}/config.json`. Create the parent directory if it does not exist. For the standard Apple Silicon prefix, a new configuration file looks like this:
+
+```json
+{
+  "cliPluginsExtraDirs": [
+    "/opt/homebrew/lib/docker/cli-plugins"
+  ]
+}
+```
+
+If the file already exists, merge this property into the existing JSON object and retain its other settings. If `cliPluginsExtraDirs` already exists, add the Homebrew path to that array without removing its existing entries. Use the actual output of `brew --prefix` instead of `/opt/homebrew` if it differs. This is the setup recommended by the [Homebrew Compose](https://formulae.brew.sh/formula/docker-compose) and [Buildx](https://formulae.brew.sh/formula/docker-buildx) packages.
+
+Check the installation before creating a VM:
+
+```sh
+luhmen --version
+docker --version
+docker compose version
+docker buildx version
+luhmen doctor
+```
+
+Homebrew manages the Docker client versions separately from luhmen. They may differ from the versions in the original release's VM checks; see [platforms and versions](support.md).
+
+If an older source installation takes precedence, `command -v luhmen` will show it. Put Homebrew's `bin` directory earlier on `PATH`, or invoke `"$(brew --prefix)/bin/luhmen"` directly. Follow the [README](../README.md#install-and-start) to create and start the VM.
+
 ## Build from source
 
 Install the macOS Command Line Tools with `xcode-select --install`, Rust through [rustup](https://rustup.rs/), and Python 3.11 or newer. The repository's `rust-toolchain.toml` selects Rust 1.95.0. The build needs network access once to download the toolchain and locked Cargo dependencies.
 
-Run these commands from the repository root:
+Install the [Docker client and plugins](#docker-client-and-plugins), then clone and build:
 
 ```sh
+git clone https://github.com/Geektrovert/luhmen.git
+cd luhmen
+./scripts/install-lima.sh --prefix "$HOME/.local/opt/luhmen-lima"
 ./scripts/install.sh --prefix "$HOME/.local"
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/opt/luhmen-lima/bin:$HOME/.local/bin:$PATH"
+luhmen doctor
 ```
 
-The installer builds with `cargo build --release --locked` and copies the executable and license files below the supplied prefix. It does not start a VM or change shell configuration. Set `CARGO_TARGET_DIR` to reuse a build directory.
+The installer builds with `cargo build --release --locked` and copies the executable and license files below the supplied prefix. It does not start a VM or change shell configuration. Set `CARGO_TARGET_DIR` to reuse a build directory. The `export` applies to the current terminal; add it to your shell configuration to use the same installation in new terminals.
 
 ## Lima
 
@@ -71,10 +111,25 @@ Keep the included license and notice files when redistributing the archive or bi
 
 ## Updating
 
-Rebuilding and rerunning the source installer replaces the CLI in the chosen prefix. Stop an active HTTPS daemon before replacing its executable, then restart it afterward.
+Stop an active HTTPS daemon before replacing its executable, then restart it afterward.
+
+For a Homebrew installation:
+
+```sh
+brew update
+brew upgrade Geektrovert/tap/luhmen
+```
+
+Rebuilding and rerunning the source installer replaces the CLI in the chosen prefix.
 
 Updating the CLI does not upgrade an existing VM's guest image, package snapshot, or Docker Engine. There is no automatic VM upgrade or migration command. Read the version's release notes before updating and back up persistent data before any manual VM replacement.
 
 ## Uninstall
 
-Stop the runtime with `luhmen stop`, then remove the installed executable and the `share/licenses/luhmen` directory from the prefix you supplied. Removing the executable does not remove VM data, Docker contexts, certificates, or credentials. Keep a backup of persistent data before manually removing the luhmen state directory. The default location is `$HOME/.local/share/luhmen`.
+Stop the runtime with `luhmen stop`. For a Homebrew installation, then run:
+
+```sh
+brew uninstall Geektrovert/tap/luhmen
+```
+
+For source or archive installations, remove the installed executable and the `share/licenses/luhmen` directory from the prefix you supplied. Removing the executable does not remove VM data, Docker contexts, certificates, or credentials. Keep a backup of persistent data before manually removing the luhmen state directory. The default location is `$HOME/.local/share/luhmen`.

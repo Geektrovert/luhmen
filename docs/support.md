@@ -24,6 +24,8 @@ luhmen is a development preview. The CLI, saved configuration, and JSON output c
 
 Lima must match exactly. Other Docker client versions may work through Engine API negotiation, but compatibility is not guaranteed. The guest image and Engine archive have pinned SHA-256 hashes. Guest packages use the dated Ubuntu snapshot. Ordinary start and stop commands do not upgrade an existing VM.
 
+The Homebrew installation was also verified on macOS 26.6.2 with Docker CLI 29.8.0, Compose 5.5.1, and Buildx 0.37.0. Fresh VM creation, container execution, Compose, Buildx builds, restart persistence, and Docker daemon recovery passed. The file-watcher limitations below still apply. Homebrew can update these client packages independently; newer versions need their own compatibility check.
+
 ## Current limits
 
 - The guest and containers use Linux arm64. Rosetta and x86 emulation are disabled; use images with an arm64 variant.

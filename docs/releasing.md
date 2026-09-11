@@ -29,3 +29,18 @@ Before publishing the repository or its first release:
 - For a binary release, verify the extracted source, archive checksums, license contents, and repeat-build comparison described above. Update [installation](install.md#release-archives) when downloads actually exist.
 
 Changing GitHub visibility, creating a tag, and uploading artifacts are separate publication steps. The local build and verification scripts do not perform them.
+
+## Homebrew tap
+
+The [Geektrovert/homebrew-tap](https://github.com/Geektrovert/homebrew-tap) repository maintains `Formula/luhmen.rb`. It installs the published macOS arm64 archive and a private, pinned Lima distribution. Users run `brew install Geektrovert/tap/luhmen`; they do not compile luhmen.
+
+After publishing a release:
+
+1. Download its binary archive and `SHA256SUMS` without GitHub credentials and verify the checksum.
+2. Update the formula's release URL, version, and SHA-256. Keep the Lima resource version and checksum aligned with `src/config.rs` and `scripts/install-lima.sh`. Keep its complete `bin` and `share` layout together.
+3. Install the formula through Homebrew and run `brew test Geektrovert/tap/luhmen` and `brew audit --strict Geektrovert/tap/luhmen`. Check that the installed binary matches the release and includes its license files.
+4. Run `luhmen doctor --json` with a separate `DOCKER_CONFIG` containing Homebrew's plugin directory. Confirm Lima, Docker, Compose, and Buildx discovery without changing the normal Docker configuration. Record the installed tool versions.
+5. Verify VM creation, a container run, Compose, and a Buildx build with those client versions on an Apple Silicon Mac. Formula tests cannot establish VM compatibility on hosted CI runners. Record any skipped checks and keep the support claims within that evidence.
+6. Publish the tap change and verify `brew install Geektrovert/tap/luhmen` can download the public assets.
+
+The Docker client dependencies can advance independently in Homebrew. The pinned Lima resource must only change with a compatible luhmen release. The formula must preserve explicit `LUHMEN_LIMACTL` overrides and must not edit a user's Docker configuration or start a VM during installation. Keep the one-time Docker plugin setup in [installation](install.md#homebrew) and the formula's caveats consistent.

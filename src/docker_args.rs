@@ -17,7 +17,7 @@ enum Arity {
 }
 
 /// Validate arguments passed after `luhmen docker` without modifying them.
-/// Long target-selection flags are rejected even inside a command payload.
+/// Long endpoint/configuration flags are rejected even inside a command payload.
 /// For exec/run/create, short flags stop at the container/image operand, as they
 /// do in Docker's non-interspersed flag parser.
 pub fn validate(args: &[String]) -> Result<()> {
@@ -54,6 +54,10 @@ pub fn validate(args: &[String]) -> Result<()> {
             // Other commands and CLI plugins have different option grammars. Keep
             // ambiguous short target flags conservative instead of guessing arities.
             for arg in options {
+                ensure!(
+                    arg != "--builder" && !arg.starts_with("--builder="),
+                    "Docker builder overrides are not allowed in the luhmen wrapper; {DIRECT_CLI}"
+                );
                 if let Some(short) = arg
                     .strip_prefix('-')
                     .filter(|value| !value.starts_with('-'))
@@ -284,6 +288,10 @@ mod tests {
             vec!["container", "run", "--config", "/other", "image"],
             vec!["ps", "-Dcother"],
             vec!["ps", "-DHunix:///other.sock"],
+            vec!["buildx", "--builder=other", "build", "."],
+            vec!["buildx", "build", "--builder", "other", "."],
+            vec!["build", "--builder=other", "."],
+            vec!["compose", "build", "--builder=other"],
             vec!["exec", "app", "program", "--context=other"],
         ] {
             assert!(check(&args).is_err(), "accepted {args:?}");
@@ -350,6 +358,7 @@ mod tests {
                 "echo hello",
             ],
             vec!["exec", "-e", "-c", "app", "true"],
+            vec!["exec", "app", "program", "--builder=fixture"],
         ] {
             assert!(check(&args).is_ok(), "rejected {args:?}");
         }
@@ -422,6 +431,7 @@ mod tests {
                 "image",
             ],
             vec!["run", "--", "image", "sh", "-c", "echo hello"],
+            vec!["run", "image", "program", "--builder=fixture"],
         ] {
             assert!(check(&args).is_ok(), "rejected {args:?}");
         }

@@ -159,7 +159,9 @@ async fn terminate_group(child: &mut Child, exits: &mut tokio::signal::unix::Sig
 async fn signal_group(group: &str, signal: &str) -> Result<()> {
     let mut command = tokio::process::Command::new("/bin/kill");
     command
-        .args([signal, group])
+        // procps kill parses a negative PID as options unless explicitly stopped.
+        // The separator is also accepted by Darwin's kill.
+        .args([signal, "--", group])
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

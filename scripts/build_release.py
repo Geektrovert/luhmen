@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -14,6 +15,8 @@ def build(repo: Path, target_dir: Path, target: str | None = None) -> tuple[Path
     target_dir = target_dir.resolve()
     cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
     sysroot = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True, cwd=repo).strip())
+    if target is None:
+        target = subprocess.check_output(["rustc", "--print", "host-tuple"], text=True, cwd=repo).strip()
     mappings = [
         (Path.home(), "/usr/local/home"),
         (target_dir, "/tmp/luhmen-build"),
@@ -33,11 +36,9 @@ def build(repo: Path, target_dir: Path, target: str | None = None) -> tuple[Path
         ),
     })
     environment.pop("RUSTFLAGS", None)
-    command = ["cargo", "build", "--release", "--locked"]
-    if target:
-        command += ["--target", target]
+    command = ["cargo", "build", "--release", "--locked", "--target", target]
     subprocess.run(command, cwd=repo, env=environment, check=True)
-    executable = target_dir / target / "release" / "luhmen" if target else target_dir / "release" / "luhmen"
+    executable = target_dir / target / "release" / "luhmen"
     contents = executable.read_bytes()
     if any(str(source).encode() in contents for source, _ in mappings):
         raise ValueError("Binary contains an unremapped local source path.")
@@ -56,7 +57,8 @@ def main() -> None:
         executable, _ = build(repo, target_dir, args.target)
     except (ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"{error}\n")
-    print(f"Built {executable.name} with local source paths remapped.")
+    print(f"Built {executable.name} with local source paths remapped.", file=sys.stderr)
+    print(executable)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 
 luhmen requires an Apple Silicon Mac running macOS 14 or newer. macOS 14 is the minimum deployment target, but has not been verified with a live VM. Intel Macs, Linux hosts, and Windows hosts are unsupported. Rust tests can run on Linux without virtualization.
 
+luhmen is an unreleased development preview. The CLI, saved configuration, and JSON output can change before a stable release. There is no compatibility or migration guarantee between development commits. Automated checks cover CLI behavior and packaging; they do not establish VM behavior on every supported macOS version.
+
 ## Version policy
 
 | Component | Required or selected version |
@@ -24,10 +26,13 @@ Lima must match exactly. Other Docker client versions may work through Engine AP
 
 ## Current limits
 
+- The guest and containers use Linux arm64. Rosetta and x86 emulation are disabled; use images with an arm64 variant.
 - CPU, memory, disk, and mount settings are fixed at VM creation.
 - Writable mount event forwarding is experimental and omits host file-removal events. Use application polling for complete change detection.
 - Local HTTPS buffers HTTP/1 requests and responses. It does not support WebSockets, CONNECT, or streaming. Certificate trust is manual.
 - VPN transitions, split DNS, authenticated proxies, IPv6, UDP forwarding, and sleep/wake behavior are unverified.
 - Backups, data migration, and disk reclamation are manual.
+
+Bug reports should include the source commit or `luhmen --version`, macOS version, and redacted `luhmen doctor --json` and `luhmen inspect --json` output. Use [GitHub issues](https://github.com/Geektrovert/luhmen/issues) for bugs and feature requests and the [security policy](../SECURITY.md) for vulnerabilities.
 
 See [runtime behavior](runtime.md), [local HTTPS](https.md), and [contributing](../CONTRIBUTING.md) for usage and checks.

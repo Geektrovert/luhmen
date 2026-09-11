@@ -62,9 +62,20 @@ impl Runtime {
             "DOCKER_TLS_VERIFY",
             "DOCKER_CERT_PATH",
             "BUILDX_BUILDER",
+            "BUILDKIT_HOST",
         ] {
             command.env_remove(variable);
         }
+        command
+    }
+
+    pub fn docker_workload_command(&self) -> Command {
+        let mut command = self.docker_command();
+        // Buildx stores a global builder selection separately from Docker's
+        // current context. Keep that state separate and select this VM's builder.
+        command
+            .env("BUILDX_CONFIG", self.state.join("buildx"))
+            .env("BUILDX_BUILDER", NAME);
         command
     }
 
@@ -82,6 +93,7 @@ impl Runtime {
 
     pub fn check_state_paths(&self) -> Result<()> {
         for path in [
+            self.state.join("buildx"),
             self.state.join("lima"),
             self.state.join("lima/luhmen"),
             self.state.join("lima/luhmen/sock"),
@@ -89,7 +101,7 @@ impl Runtime {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) => ensure!(
                     metadata.is_dir() && !metadata.file_type().is_symlink(),
-                    "refusing an unowned or symlinked Lima directory: {}",
+                    "refusing an unowned or symlinked runtime directory: {}",
                     path.display()
                 ),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -571,8 +583,22 @@ impl Runtime {
             .ancestors()
             .find(|p| p.exists())
             .context("state path has no existing ancestor")?;
-        Ok(
-            json!({"schema_version":1,"supported_host":host.is_ok(),"host_error":host.err().map(|e|e.to_string()),"lima_version":LIMA_VERSION,"lima_ready":lima.is_ok(),"lima_error":lima.err().map(|e|e.to_string()),"docker":docker.as_ref().ok().map(|v|v.trim()),"docker_error":docker.err().map(|e|e.to_string()),"compose":compose.as_ref().ok().map(|v|v.trim()),"buildx":buildx.as_ref().ok().map(|v|v.trim()),"free_bytes":fs2::available_space(ancestor)?,"state_directory":self.state,"endpoint":self.endpoint()}),
-        )
+        Ok(json!({
+            "schema_version": 1,
+            "supported_host": host.is_ok(),
+            "host_error": host.err().map(|error| format!("{error:#}")),
+            "lima_version": LIMA_VERSION,
+            "lima_ready": lima.is_ok(),
+            "lima_error": lima.err().map(|error| format!("{error:#}")),
+            "docker": docker.as_ref().ok().map(|value| value.trim()),
+            "docker_error": docker.err().map(|error| format!("{error:#}")),
+            "compose": compose.as_ref().ok().map(|value| value.trim()),
+            "compose_error": compose.err().map(|error| format!("{error:#}")),
+            "buildx": buildx.as_ref().ok().map(|value| value.trim()),
+            "buildx_error": buildx.err().map(|error| format!("{error:#}")),
+            "free_bytes": fs2::available_space(ancestor)?,
+            "state_directory": self.state,
+            "endpoint": self.endpoint(),
+        }))
     }
 }

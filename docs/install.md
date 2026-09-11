@@ -4,6 +4,8 @@
 
 Install the macOS Command Line Tools with `xcode-select --install`, Rust through [rustup](https://rustup.rs/), and Python 3.11 or newer. The repository's `rust-toolchain.toml` selects Rust 1.95.0. The build needs network access once to download the toolchain and locked Cargo dependencies.
 
+Run these commands from the repository root:
+
 ```sh
 ./scripts/install.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -40,13 +42,40 @@ docker buildx version
 luhmen doctor
 ```
 
-Lima and Docker plugins are separate dependencies; Cargo does not install them. See [platforms and versions](support.md) for compatibility limits.
+Lima and Docker plugins are separate dependencies; Cargo does not install them. `doctor` checks that the client and both plugins run, but does not enforce their selected versions. See [platforms and versions](support.md) for compatibility limits.
 
 VM creation downloads a checksum-pinned Ubuntu image. The first start installs guest packages and a checksum-pinned Docker Engine archive. Missing upstream artifacts prevent new VM preparation; use a luhmen version with updated pins. Existing VMs reuse their installed image and Engine.
 
 ## Release archives
 
-Extract the `luhmen-<version>-aarch64-apple-darwin.tar.gz` archive after verifying its entry in `SHA256SUMS`, then copy `bin/luhmen` into a directory on `PATH`. Keep the included license and notice files when redistributing the archive or binary. Lima and Docker clients are installed separately.
+There are no published release archives yet. Build from source using the instructions above.
+
+When a release is available, download its `luhmen-<version>-aarch64-apple-darwin.tar.gz` archive and `SHA256SUMS` from the same release. Set `luhmen_version` to the downloaded version and verify the archive before extracting it:
+
+```sh
+luhmen_version=0.1.0
+luhmen_package="luhmen-${luhmen_version}-aarch64-apple-darwin"
+shasum -a 256 "${luhmen_package}.tar.gz"
+```
+
+Compare the result with the matching line in `SHA256SUMS`. If it matches, extract and install:
+
+```sh
+tar -xzf "${luhmen_package}.tar.gz"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/licenses/luhmen"
+install -m 755 "$luhmen_package/bin/luhmen" "$HOME/.local/bin/luhmen"
+cp -R "$luhmen_package/share/licenses/luhmen/." "$HOME/.local/share/licenses/luhmen/"
+export PATH="$HOME/.local/bin:$PATH"
+luhmen --version
+```
+
+Keep the included license and notice files when redistributing the archive or binary. Lima and Docker clients are installed separately. Binary archives do not contain the source build scripts; use the source archive or a Git checkout to build from source.
+
+## Updating
+
+Rebuilding and rerunning the source installer replaces the CLI in the chosen prefix. Stop an active HTTPS daemon before replacing its executable, then restart it afterward.
+
+Updating the CLI does not upgrade an existing VM's guest image, package snapshot, or Docker Engine. There is no automatic VM upgrade or migration command. Read the version's release notes before updating and back up persistent data before any manual VM replacement.
 
 ## Uninstall
 

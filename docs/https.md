@@ -2,7 +2,7 @@
 
 `luhmen daemon` proxies HTTPS requests for `.localhost` names to HTTP ports published on the Mac. It listens on `127.0.0.1` and runs in the foreground.
 
-Create a configuration file:
+Save this configuration as `gateway.json`:
 
 ```json
 {

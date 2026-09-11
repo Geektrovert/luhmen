@@ -1,0 +1,32 @@
+name: Dependency security
+
+on:
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/security.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/security.yml
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit locked dependencies
+        run: cargo audit --deny warnings

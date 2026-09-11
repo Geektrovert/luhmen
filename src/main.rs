@@ -217,7 +217,7 @@ fn execute(cli: Cli, cancelled: Cancellation) -> Result<()> {
                 "luhmen context is missing; run `luhmen start`"
             );
             let error = runtime
-                .docker_command()
+                .docker_workload_command()
                 .args(["--context", "luhmen"])
                 .args(args)
                 .exec();

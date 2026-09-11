@@ -1,9 +1,11 @@
-"""Release artifact and dependency-notice contract checks, without a Rust build."""
+"""Release artifact, source installation, and dependency-notice contract checks."""
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -21,6 +23,43 @@ spec.loader.exec_module(collect_licenses)
 
 
 class DistributionTests(unittest.TestCase):
+    def test_source_install_uses_host_target_despite_cargo_defaults(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="luhmen-install-test-") as directory:
+            root = Path(directory)
+            repo = root / "source with spaces"
+            (repo / "src").mkdir(parents=True)
+            (repo / ".cargo").mkdir()
+            (repo / "scripts").mkdir()
+            (repo / "Cargo.toml").write_text(
+                '[package]\nname = "luhmen"\nversion = "0.0.0"\nedition = "2024"\n'
+            )
+            (repo / "Cargo.lock").write_text(
+                'version = 4\n\n[[package]]\nname = "luhmen"\nversion = "0.0.0"\n'
+            )
+            (repo / "src" / "main.rs").write_text('fn main() { println!("installed host executable"); }\n')
+            (repo / ".cargo" / "config.toml").write_text('[build]\ntarget = "invalid-config-target"\n')
+            for name in ["install.sh", "build_release.py", "collect-licenses.py"]:
+                shutil.copy2(Path(__file__).with_name(name), repo / "scripts" / name)
+            shutil.copy2(Path(__file__).resolve().parent.parent / "rust-toolchain.toml", repo / "rust-toolchain.toml")
+            for name in ["LICENSE", "NOTICE", "THIRD_PARTY.md"]:
+                (repo / name).write_text(f"Fixture {name}\n")
+            target = root / "build with spaces"
+            (target / "release").mkdir(parents=True)
+            (target / "release" / "luhmen").write_text("stale executable must not be installed\n")
+            prefix = root / "install with spaces"
+            environment = dict(os.environ, CARGO_BUILD_TARGET="invalid-env-target", CARGO_TARGET_DIR=str(target))
+            result = subprocess.run(
+                [str(repo / "scripts" / "install.sh"), "--prefix", str(prefix)],
+                cwd=repo, env=environment, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                subprocess.check_output([str(prefix / "bin" / "luhmen")], text=True),
+                "installed host executable\n",
+            )
+            self.assertTrue((prefix / "share" / "licenses" / "luhmen" / "dependencies" / "index.json").is_file())
+            self.assertFalse((repo / ".git").exists())
+
     def test_archive_is_reproducible_and_has_normalized_metadata(self) -> None:
         with tempfile.TemporaryDirectory(prefix="luhmen-archive-test-") as directory:
             root = Path(directory)

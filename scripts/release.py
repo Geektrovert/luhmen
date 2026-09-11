@@ -75,7 +75,7 @@ def release(output: Path) -> None:
             "python3", "scripts/collect-licenses.py", "--target", TARGET,
             "--output", str(notices / "dependencies"),
         ], env=environment, check=True)
-        for name in ["README.md", "CONTRIBUTING.md", "LICENSE", "NOTICE", "THIRD_PARTY.md"]:
+        for name in ["README.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE", "NOTICE", "THIRD_PARTY.md"]:
             shutil.copyfile(repo / name, package / name)
         shutil.copytree(repo / "docs", package / "docs")
         build_info = {

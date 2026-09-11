@@ -106,7 +106,7 @@ impl Gateway {
 fn client_config(state_dir: &Path) -> Arc<rustls::ClientConfig> {
     let pem = fs::read(state_dir.join("gateway-ca/ca.pem")).unwrap();
     let mut roots = rustls::RootCertStore::empty();
-    for certificate in rustls_pemfile::certs(&mut pem.as_slice()) {
+    for certificate in CertificateDer::pem_slice_iter(&pem) {
         roots.add(certificate.unwrap()).unwrap();
     }
     Arc::new(

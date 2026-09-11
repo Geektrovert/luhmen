@@ -16,3 +16,16 @@ Build twice using the same source commit, Rust toolchain, macOS SDK, Cargo depen
 Extract the source archive into a fresh directory and run `cargo test --locked` and `scripts/install.sh --prefix /absolute/temporary/prefix` to verify the shipped source. This must work without a Git directory. Git is required only for producing releases and running the clean-checkout helper.
 
 The script does not sign, notarize, upload, or publish artifacts. If signing or notarizing, record that step and regenerate checksums for the final files. Packages do not bundle Lima, Docker client tools, or a VM disk.
+
+## Publication checks
+
+Before publishing the repository or its first release:
+
+- Confirm the GitHub checks pass for the exact commit being published. A local test run does not replace the remote result.
+- Review the tracked tree and Git history for credentials, private material, and machine-specific paths. `scripts/check-source.py` checks current files for home paths; it is not a secret or history scanner.
+- Enable GitHub private vulnerability reporting and verify the route in [the security policy](../SECURITY.md). Confirm issues are available for ordinary bug reports.
+- Describe the release as a development preview. Keep [support limits](support.md) and the README consistent with the evidence, especially the unverified macOS 14 VM behavior.
+- Record live VM checks, tool versions, skipped checks, and known failures in the release notes. Include a second-machine installation check before claiming the packaged runtime works for new users.
+- For a binary release, verify the extracted source, archive checksums, license contents, and repeat-build comparison described above. Update [installation](install.md#release-archives) when downloads actually exist.
+
+Changing GitHub visibility, creating a tag, and uploading artifacts are separate publication steps. The local build and verification scripts do not perform them.

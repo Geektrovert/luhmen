@@ -14,8 +14,12 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
@@ -32,5 +36,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Verify installation and dependency licenses
         run: |
+          mkdir "$RUNNER_TEMP/luhmen-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/luhmen-source"
+          cd "$RUNNER_TEMP/luhmen-source"
           ./scripts/install.sh --prefix "$RUNNER_TEMP/luhmen-install"
+          "$RUNNER_TEMP/luhmen-install/bin/luhmen" --version
           "$RUNNER_TEMP/luhmen-install/bin/luhmen" --help
+          test -s "$RUNNER_TEMP/luhmen-install/share/licenses/luhmen/dependencies/index.json"
+      - name: Verify Cargo source package
+        run: cargo package --locked

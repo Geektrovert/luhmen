@@ -53,7 +53,7 @@ set -eu
 case "$1 $2" in
   'context ls') printf 'unrelated\nluhmen\n' ;;
   'context inspect') cat "$FIXTURE/context.json" ;;
-  '--context luhmen') printf docker >> "$FIXTURE/workload-actions"; printf '%s\n' "$*"; printf 'DOCKER_HOST=%s\nDOCKER_CONTEXT=%s\nBUILDX_BUILDER=%s\n' "${DOCKER_HOST-unset}" "${DOCKER_CONTEXT-unset}" "${BUILDX_BUILDER-unset}" ;;
+  '--context luhmen') printf docker >> "$FIXTURE/workload-actions"; printf '%s\n' "$*"; printf 'DOCKER_HOST=%s\nDOCKER_CONTEXT=%s\nBUILDX_BUILDER=%s\nBUILDKIT_HOST=%s\nBUILDX_CONFIG=%s\n' "${DOCKER_HOST-unset}" "${DOCKER_CONTEXT-unset}" "${BUILDX_BUILDER-unset}" "${BUILDKIT_HOST-unset}" "${BUILDX_CONFIG-unset}" ;;
   *) exit 9 ;;
 esac
 "#,
@@ -72,6 +72,8 @@ esac
             .env("DOCKER_HOST", "unix:///unrelated.sock")
             .env("DOCKER_CONTEXT", "unrelated")
             .env("BUILDX_BUILDER", "unrelated")
+            .env("BUILDKIT_HOST", "tcp://unrelated.invalid:1234")
+            .env("BUILDX_CONFIG", self.temp.path().join("unrelated-builders"))
             .output()
             .unwrap()
     }
@@ -163,7 +165,7 @@ fn starting_an_already_running_vm_records_real_socket_confirmation() {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc::{self, TryRecvError};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let fixture = Fixture::new();
     let root = fs::canonicalize(fixture.temp.path()).unwrap();
     fs::write(root.join("state/lima/luhmen/status"), "Running").unwrap();
@@ -173,9 +175,10 @@ fn starting_an_already_running_vm_records_real_socket_confirmation() {
     listener.set_nonblocking(true).unwrap();
     let (shutdown, stopped) = mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
         let mut requests = 0;
-        while matches!(stopped.try_recv(), Err(TryRecvError::Empty)) && Instant::now() < deadline {
+        // Preflight can take longer on a busy runner. Keep the fake Engine alive
+        // until the CLI returns and drops the shutdown sender.
+        while matches!(stopped.try_recv(), Err(TryRecvError::Empty)) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     stream
@@ -241,7 +244,10 @@ fn docker_wrapper_uses_only_the_owned_context() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "--context luhmen run --rm example\nDOCKER_HOST=unset\nDOCKER_CONTEXT=unset\nBUILDX_BUILDER=unset\n"
+        format!(
+            "--context luhmen run --rm example\nDOCKER_HOST=unset\nDOCKER_CONTEXT=unset\nBUILDX_BUILDER=luhmen\nBUILDKIT_HOST=unset\nBUILDX_CONFIG={}/state/buildx\n",
+            fs::canonicalize(fixture.temp.path()).unwrap().display()
+        )
     );
     assert!(
         !fixture
@@ -270,6 +276,21 @@ fn docker_wrapper_uses_only_the_owned_context() {
 }
 
 #[test]
+fn docker_wrapper_rejects_explicit_builder_overrides_before_running_workloads() {
+    let fixture = Fixture::new();
+    for args in [
+        vec!["docker", "buildx", "--builder=unrelated", "build", "."],
+        vec!["docker", "build", "--builder", "unrelated", "."],
+        vec!["docker", "compose", "build", "--builder=unrelated"],
+    ] {
+        let output = fixture.run(&args);
+        assert!(!output.status.success(), "accepted {args:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("builder overrides"));
+    }
+    assert!(!fixture.temp.path().join("workload-actions").exists());
+}
+
+#[test]
 fn foreign_context_is_preserved_and_rejected() {
     let fixture = Fixture::new();
     let path = fixture.temp.path().join("context.json");
@@ -282,8 +303,9 @@ fn foreign_context_is_preserved_and_rejected() {
 }
 
 #[test]
-fn symlinked_lima_directories_and_socket_are_rejected_before_workload_actions() {
+fn symlinked_runtime_directories_and_socket_are_rejected_before_workload_actions() {
     for relative in [
+        "buildx",
         "lima",
         "lima/luhmen",
         "lima/luhmen/sock",
@@ -294,6 +316,7 @@ fn symlinked_lima_directories_and_socket_are_rejected_before_workload_actions() 
         let state = root.join("state");
         fs::write(state.join("lima/luhmen/status"), "Running").unwrap();
         fs::create_dir(state.join("lima/luhmen/sock")).unwrap();
+        fs::create_dir(state.join("buildx")).unwrap();
         let path = state.join(relative);
         let foreign = root.join("foreign-target");
         if relative.ends_with("docker.sock") {

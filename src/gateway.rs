@@ -11,6 +11,7 @@ use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, GeneralSubtree};
 use rcgen::{IsCa, Issuer, KeyPair, KeyUsagePurpose, NameConstraints};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::ResolvesServerCertUsingSni;
 use serde::Deserialize;
@@ -196,9 +197,8 @@ fn load_ca(ca_dir: &Path) -> Result<(Issuer<'static, KeyPair>, CertificateDer<'s
     }
     let key = KeyPair::from_pem(&fs::read_to_string(ca_dir.join("key.pem"))?)?;
     let pem = fs::read_to_string(ca_dir.join("ca.pem"))?;
-    let cert = rustls_pemfile::certs(&mut pem.as_bytes())
-        .next()
-        .context("CA PEM contains no certificate")??;
+    let cert = CertificateDer::from_pem_slice(pem.as_bytes())
+        .context("CA PEM contains no valid certificate")?;
     // Also check that the persisted private key belongs to the persisted certificate.
     rustls::sign::CertifiedKey::from_der(
         vec![cert.clone()],

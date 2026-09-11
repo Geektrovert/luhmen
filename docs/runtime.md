@@ -6,6 +6,8 @@ luhmen owns one Lima VM named `luhmen`. Its configuration, disk, and sockets liv
 
 The Docker context is also named `luhmen`. luhmen rejects an existing context that points elsewhere and leaves Docker's active context and registry credentials unchanged. It will not adopt another runtime's VM or a nonempty state directory without its ownership marker.
 
+Changing `LUHMEN_HOME` alone does not create a separate Docker context namespace. For an isolated development VM, also use a separate `DOCKER_CONFIG` directory, which separates Docker contexts and credentials. Keep both settings for every command and make Compose and Buildx available in that Docker configuration.
+
 The VM disk contains Docker images, containers, BuildKit cache, and named volumes. Stopping or restarting the VM preserves that disk. A bind mount exposes a host directory and stores its contents on the host instead.
 
 Lima uses `$HOME/Library/Caches/lima` for downloaded images, metadata, and converted disks. Other Lima installations can use this cache. luhmen does not remove it.
@@ -67,7 +69,9 @@ docker --context luhmen ps
 docker --context luhmen compose up -d
 ```
 
-`luhmen docker ...` also selects this context and clears Docker endpoint and Buildx builder environment overrides.
+`luhmen docker ...` also selects this context and clears Docker endpoint overrides. It uses a separate Buildx store under the luhmen state directory at `buildx` and selects the `luhmen` builder. This keeps builds on the context's default Docker driver even when your regular Buildx configuration has a different selected builder or a builder with the same name.
+
+The wrapper rejects explicit builder overrides. Use `docker --context luhmen ...` directly to manage custom builders; their selection and endpoints are then controlled by Docker and Buildx.
 
 Publish container ports with `-p 127.0.0.1:8080:80` for local access. Port forwarding, guest DNS, and proxy handling use Lima's host integration. VPNs, proxies, corporate DNS, and overlapping address ranges can affect connectivity. See [platforms and versions](support.md) for limits.
 
@@ -76,6 +80,23 @@ Local HTTPS uses a separate proxy in front of explicitly configured localhost po
 ## Recovery and diagnostics
 
 Start with `luhmen inspect --json` and `luhmen doctor --json`. Check free disk space and logs under the state directory after provisioning or boot failures. Correct missing dependencies or network problems, then retry `start`.
+
+| Symptom | Next step |
+| --- | --- |
+| `luhmen` or `limactl` is not found | Restore the install directories to `PATH`, as shown in [installation](install.md). |
+| `doctor` reports a different Lima version | Put the pinned Lima installation first on `PATH`, or set `LUHMEN_LIMACTL` to its executable. |
+| `doctor` cannot find Compose or Buildx | Run `docker compose version` and `docker buildx version`, then check the plugin installation and `DOCKER_CONFIG`. |
+| The Docker context belongs to another state directory | Restore the `LUHMEN_HOME` and `DOCKER_CONFIG` used to create that VM. Inspect the existing context before changing it. |
+| A mount directory is missing | Restore the directory at its original path before starting. Inspection and shutdown still work. |
+| A container reports `exec format error` | Check that its image supports Linux arm64. x86 emulation is disabled. |
+
+If the guest is running but Docker Engine is unavailable, inspect its service log:
+
+```sh
+luhmen shell sudo journalctl -u docker.service --no-pager -n 100
+```
+
+Before attaching diagnostics to a public issue, remove credentials, private registry names, private project paths, and workload data. Do not attach the state directory or Docker's `config.json`.
 
 Use `stop` before repairing Lima configuration or copying the disk for backup. `stop --force` can terminate a stuck VM, but may lose unwritten guest data and cannot repair configuration. Do not delete the VM disk to recover from a startup error.
 

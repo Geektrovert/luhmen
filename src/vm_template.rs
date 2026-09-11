@@ -4,7 +4,7 @@ use serde_json::json;
 use crate::config::{Config, LIMA_VERSION};
 
 pub const IMAGE_URL: &str = "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20260905/ubuntu-24.04-minimal-cloudimg-arm64.img";
-pub const IMAGE_MIRROR_URL: &str = "https://mirrors.ustc.edu.cn/ubuntu-cloud-images/minimal/releases/noble/release-20260905/ubuntu-24.04-minimal-cloudimg-arm64.img";
+pub const IMAGE_MIRROR_URL: &str = "https://mirrors.nju.edu.cn/ubuntu-cloud-images/minimal/releases/noble/release-20260905/ubuntu-24.04-minimal-cloudimg-arm64.img";
 pub const IMAGE_SHA256: &str = "8b6e0e145ae2ce681d959b2b3aabcf724b027cbffff9ec8ba4d7dc789a3e6a98";
 pub const DOCKER_VERSION: &str = "29.8.0";
 pub const DOCKER_URL: &str =

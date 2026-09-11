@@ -19,7 +19,7 @@ These components are installed or downloaded separately. They are not included i
 
 The guest contains additional distribution packages under their respective licenses. Package copyright files are available under `/usr/share/doc` in the VM. Distribution package sources are available through the corresponding Ubuntu and Docker upstream repositories. Redistributing a guest disk is outside the binary release process and requires its own complete license and source-offer review.
 
-VM creation downloads the Ubuntu image from Canonical first, then tries the [USTC Ubuntu Cloud Images mirror](https://mirrors.ustc.edu.cn/help/ubuntu-cloud-images.html) if the primary download fails. Both locations use the same pinned image version and SHA-256 digest.
+VM creation downloads the Ubuntu image from Canonical first, then tries the [Nanjing University Ubuntu Cloud Images mirror](https://mirrors.nju.edu.cn/ubuntu-cloud-images/) if the primary download fails. Both locations use the same pinned image version and SHA-256 digest.
 
 ## Rust dependencies
 

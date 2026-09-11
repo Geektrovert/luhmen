@@ -173,6 +173,33 @@ fn upstream(response: impl AsRef<[u8]>) -> (u16, JoinHandle<String>) {
 }
 
 #[test]
+fn https_certificate_passes_openssl_strict_verification() {
+    let reserved_upstream = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let gateway = Gateway::new(reserved_upstream.local_addr().unwrap().port());
+    let result = std::process::Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import socket, ssl, sys
+context = ssl.create_default_context(cafile=sys.argv[1])
+context.verify_flags |= ssl.VERIFY_X509_STRICT
+with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=5) as stream:
+    with context.wrap_socket(stream, server_hostname="app.localhost") as tls:
+        assert tls.getpeercert()["subjectAltName"] == (("DNS", "app.localhost"),)
+"#,
+        ])
+        .arg(gateway.directory.path().join("gateway-ca/ca.pem"))
+        .arg(gateway.port.to_string())
+        .output()
+        .expect("Python 3 with OpenSSL is required for the TLS interoperability test");
+    assert!(
+        result.status.success(),
+        "strict TLS verification failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn https_forwards_chunked_bodies_and_filters_connection_headers() {
     let (upstream_port, upstream) = upstream(
         "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\nConnection: close, x-private\r\nX-Private: secret\r\nX-App: present\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",

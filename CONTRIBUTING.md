@@ -1,6 +1,6 @@
 # Contributing
 
-Build with the Rust toolchain selected by `rust-toolchain.toml` and retain `Cargo.lock` changes when dependencies change. Host dependencies and OS requirements are in [installation](docs/install.md).
+Build with the Rust toolchain selected by `rust-toolchain.toml` and retain `Cargo.lock` changes when dependencies change. Tests also require Python 3.11 or later with its OpenSSL-backed `ssl` module for strict TLS interoperability checks. Host dependencies and OS requirements are in [installation](docs/install.md).
 
 Run these checks before submitting a change:
 

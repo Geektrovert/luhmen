@@ -222,6 +222,7 @@ fn tls_config(state_dir: &Path, routes: &BTreeMap<String, u16>) -> Result<rustls
             .push(DnType::CommonName, hostname.clone());
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.use_authority_key_identifier_extension = true;
         let now = time::OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::days(1);
         params.not_after = now + time::Duration::days(365);

@@ -588,7 +588,7 @@ class Suite:
             with tempfile.TemporaryFile(dir=self.fixture) as output, tempfile.TemporaryFile(dir=self.fixture) as errors:
                 process = subprocess.Popen(
                     [self.luhmen, "shell", "timeout", "8", "inotifywait", "--monitor", "--recursive",
-                     "--format", "%e|%w%f", "--event", "modify,create,moved_to,moved_from,delete", str(shared)],
+                     "--format", "%e|%w%f", "--event", "modify,attrib,create,moved_to,moved_from,delete", str(shared)],
                     stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
                     start_new_session=True,
                 )
@@ -602,40 +602,42 @@ class Suite:
                         time.sleep(0.1)
                     else:
                         raise RuntimeError("inotifywait did not establish watches")
-                    expected = [(str(path), "MODIFY")]
+                    # Lima forwards host writes by changing guest timestamps,
+                    # which emits ATTRIB. Native guest writes may emit MODIFY.
+                    expected = [(str(path), ("MODIFY", "ATTRIB"))]
                     if operation in ("delete", "recreate"):
                         path.unlink()
-                        expected = [(str(path), "DELETE")]
+                        expected = [(str(path), ("DELETE",))]
                         if operation == "recreate":
                             path.write_text("after!")
-                            expected.append((str(path), "CREATE"))
+                            expected.append((str(path), ("CREATE",)))
                     elif operation == "replace":
                         temporary = path.with_suffix(".new")
                         temporary.write_text("after!")
                         temporary.replace(path)
-                        expected = [(str(path), "MOVED_TO")]
+                        expected = [(str(path), ("MOVED_TO",))]
                     elif operation == "rename":
                         destination = path.with_suffix(".renamed")
                         path.rename(destination)
-                        expected = [(str(path), "MOVED_FROM"), (str(destination), "MOVED_TO")]
+                        expected = [(str(path), ("MOVED_FROM",)), (str(destination), ("MOVED_TO",))]
                     else:
                         path.write_text("after!")
                         if operation == "create":
-                            expected = [(str(path), "CREATE")]
+                            expected = [(str(path), ("CREATE",))]
                     require(process.wait(timeout=12) == 124,
                             "inotifywait failed before its observation timeout")
                     output.seek(0)
                     events = output.read().decode().splitlines()
                     paths = {path for path, _ in expected}
                     observed = [event for event in events if event.partition("|")[2] in paths]
-                    missing = [{"path": target, "event": kind} for target, kind in expected
+                    missing = [{"path": target, "any_of": kinds} for target, kinds in expected
                                if not any(event.partition("|")[2] == target
-                                          and kind in event.partition("|")[0].split(",")
+                                          and any(kind in event.partition("|")[0].split(",") for kind in kinds)
                                           for event in observed)]
                     require(not missing or not required, f"No host {name} event reached guest inotify")
                     emit("watcher_" + name, "passed" if not missing else "limitation",
                          events=observed, missing=missing,
-                         note="Typed notification check; file contents are checked separately. Use application polling for missing events")
+                         note="Host writes may emit ATTRIB through Lima. File contents are checked separately. Use application polling for missing events")
                 finally:
                     if process.poll() is None:
                         try:

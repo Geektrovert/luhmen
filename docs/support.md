@@ -28,7 +28,7 @@ Lima must match exactly. Other Docker client versions may work through Engine AP
 
 - The guest and containers use Linux arm64. Rosetta and x86 emulation are disabled; use images with an arm64 variant.
 - CPU, memory, disk, and mount settings are fixed at VM creation.
-- Writable mount event forwarding is experimental and omits host file-removal events. Use application polling for complete change detection.
+- Writable mount event forwarding is experimental. Host changes produce `IN_ATTRIB` notifications; `IN_MODIFY` and exact create/rename/delete event sequences are not guaranteed. Use application polling for complete change detection.
 - Local HTTPS buffers HTTP/1 requests and responses. It does not support WebSockets, CONNECT, or streaming. Certificate trust is manual.
 - VPN transitions, split DNS, authenticated proxies, IPv6, UDP forwarding, and sleep/wake behavior are unverified.
 - Backups, data migration, and disk reclamation are manual.

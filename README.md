@@ -51,7 +51,7 @@ luhmen stop
 ## Before using it
 
 - Containers run as Linux arm64. Rosetta and x86 emulation are disabled.
-- File contents sync through VirtioFS, but host file-removal events do not reach guest watchers. Development servers may need polling.
+- File contents sync through VirtioFS. Lima forwards host changes as attribute notifications; development servers that require `MODIFY` events or reliable create/rename/delete detection need polling.
 - VM upgrades, data migration, backups, and disk reclamation are manual. Keep important data backed up.
 - Local HTTPS is optional and does not support WebSockets or streaming.
 

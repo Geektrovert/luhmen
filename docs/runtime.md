@@ -38,7 +38,7 @@ The stored configuration uses this format:
 
 Use `--mount /absolute/path:rw` for writable shares or `--mount /absolute/path:ro` for read-only shares. Shares must be existing directories and cannot overlap each other or luhmen's state directory. No host directories are shared by default.
 
-VirtioFS carries file contents between the Mac and VM. Lima's experimental `mountInotify` forwards some host changes on writable mounts, but omits host file-removal events. Enable polling in development servers that need complete change detection. See [Lima's mount documentation](https://lima-vm.io/docs/config/mount/#mount-inotify).
+VirtioFS carries file contents between the Mac and VM. Lima's experimental `mountInotify` forwards some host changes on writable mounts by updating guest file timestamps. This produces `IN_ATTRIB` notifications. Use polling in applications that require `IN_MODIFY`, deletion events, or exact create/rename behavior. See [Lima's mount documentation](https://lima-vm.io/docs/config/mount/#mount-inotify).
 
 `LUHMEN_LIMACTL` and `LUHMEN_DOCKER` select executable paths instead of `limactl` and `docker` on `PATH`. The Lima version requirement still applies.
 
@@ -51,6 +51,8 @@ Start and restart print elapsed milliseconds for `preflight`, `lima_start`, and 
 `inspect --json` includes the saved attempt under `last_start`, with stages marked `running`, `complete`, `failed`, or `skipped`. An interrupted command can leave a stage marked `running`. Report write failures produce warnings; invalid reports appear in inspection errors. Use live readiness fields to check current health.
 
 `stop` requests a graceful guest shutdown. `restart` stops and starts the same VM. Docker restart policies determine which containers resume. The VM disk persists in both cases.
+
+New VMs enable Docker's [live restore](https://docs.docker.com/engine/daemon/live-restore/) so running containers can survive a Docker daemon failure. The guest service restarts the daemon automatically. Live restore does not keep containers running through a VM shutdown or guarantee recovery after daemon configuration changes.
 
 Only one lifecycle command can run at a time. Cancellation and deadlines terminate the temporary command and its helpers, while Lima's detached VM process can remain running. Inspect the VM before retrying. After interrupted creation, rerun `create` with the same settings if the VM is missing, or `start` if it exists.
 

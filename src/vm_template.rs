@@ -46,7 +46,8 @@ pub fn render(config: &Config) -> Result<String> {
         "memory": format!("{}GiB", config.memory_gib),
         "disk": format!("{}GiB", config.disk_gib),
         "mountType": "virtiofs",
-        // Lima forwards changes on writable mounts. Host deletions need polling.
+        // Lima forwards host changes as attribute notifications. Deletions and
+        // tools that require exact modify events need polling.
         "mountInotify": true,
         "mounts": mounts,
         "containerd": { "system": false, "user": false },
@@ -68,7 +69,7 @@ pub fn render(config: &Config) -> Result<String> {
         ],
         "provision": [
             { "mode": "dependency", "skipDefaultDependencyResolution": false, "script": dependencies },
-            { "mode": "data", "path": "/etc/docker/daemon.json", "content": "{\"data-root\":\"/var/lib/docker\",\"log-driver\":\"local\",\"features\":{\"containerd-snapshotter\":true}}\n", "owner": "root:root", "permissions": "0600" },
+            { "mode": "data", "path": "/etc/docker/daemon.json", "content": "{\"data-root\":\"/var/lib/docker\",\"log-driver\":\"local\",\"live-restore\":true,\"features\":{\"containerd-snapshotter\":true}}\n", "owner": "root:root", "permissions": "0600" },
             { "mode": "data", "path": "/etc/systemd/system/docker.socket", "content": DOCKER_SOCKET, "owner": "root:root", "permissions": "0644" },
             { "mode": "data", "path": "/etc/systemd/system/docker.service", "content": DOCKER_SERVICE, "owner": "root:root", "permissions": "0644" },
             { "mode": "system", "script": install }

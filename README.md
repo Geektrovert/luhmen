@@ -1,10 +1,10 @@
 # luhmen
 
-luhmen runs Docker Engine in a dedicated Linux VM on Apple Silicon Macs. Its Rust CLI manages Lima with Apple's Virtualization.framework. Docker CLI, Compose, Buildx, and SDK clients use the Engine API through the `luhmen` Docker context.
+luhmen runs Docker Engine and optional Firecracker microVMs on Apple Silicon Macs. Its Rust CLI manages a dedicated Linux VM through Lima and Apple's Virtualization.framework. Docker CLI, Compose, Buildx, and SDK clients use the Engine API through the `luhmen` Docker context.
+
+On supported Macs, Firecracker runs inside that Linux VM using nested hardware virtualization. Each microVM boots its own Linux kernel and has a private writable disk. Both the parent VM and Firecracker guests run ARM64 code with Rosetta disabled.
 
 This is a development preview for local development. Expect CLI and configuration changes before a stable release. See [supported platforms, versions, and limits](docs/support.md).
-
-The source tree includes unreleased provisioning updates, HTTPS streaming, and nested Firecracker support. Homebrew currently installs v0.1.0, which does not include those changes.
 
 ## Requirements
 
@@ -50,28 +50,48 @@ luhmen stop
 
 `luhmen create --dry-run` prints the VM configuration without creating state. See [runtime behavior](docs/runtime.md) for configuration, mounts, ports, and recovery; [storage](docs/storage.md) for disk usage; and [local HTTPS](docs/https.md) for domains and certificates.
 
-## Optional Firecracker microVMs
+## Firecracker microVMs
 
-On Apple M3 or newer running macOS 15 or later, opt into Lima's nested virtualization path when creating the VM:
+Firecracker lets you boot your own Linux kernel and root filesystem inside the luhmen VM. Docker containers share the parent VM's kernel; each Firecracker microVM has its own. luhmen manages Firecracker and its jailer, assigns CPU and memory limits, and retains each microVM's disk across starts.
+
+This requires an Apple M3 or newer running macOS 15 or later. Firecracker support is available in the [current source build](docs/install.md#build-from-source); the v0.1.0 release archives and Homebrew package do not include it.
+
+Enable nested virtualization when you first create the parent VM. This setting cannot be added to an existing VM. The parent must be running before using any `luhmen microvm` command:
 
 ```sh
 luhmen create --nested-virtualization --cpus 4 --memory 4 --disk 30
 luhmen start
-luhmen microvm capabilities
-luhmen microvm create demo --kernel /path/in/the/lima-vm/vmlinux --rootfs /path/in/the/lima-vm/rootfs.ext4
+luhmen microvm capabilities --json
+```
+
+Supply an uncompressed ARM64 Linux kernel and an ext4 root filesystem. Both must be regular files at absolute paths inside the parent VM, with no whitespace, quotes, or backslashes in their paths. You can use files already in the guest or expose a host directory with `--mount` when creating the parent VM. luhmen does not download or build these guest images for you.
+
+Register a microVM with those paths, then start it:
+
+```sh
+luhmen microvm create demo \
+  --kernel /path/in/the/lima-vm/vmlinux \
+  --rootfs /path/in/the/lima-vm/rootfs.ext4 \
+  --vcpus 1 --memory-mib 512
 luhmen microvm start demo
-luhmen microvm inspect demo
+luhmen microvm inspect demo --json
 luhmen microvm stop demo
 ```
 
-The kernel and root filesystem must already be visible inside the Lima VM. The first implementation is deliberately small: it runs Firecracker and its jailer inside the guest, supports no-network VMs, and does not provide guest exec, snapshots, automatic host mounts, or Docker integration. `luhmen microvm capabilities --json` shows KVM, cgroup, binary, and parent-resource diagnostics. Starts use per-VM unprivileged jailer identities, cgroup resource limits, and bounded logs. The parent VM must be running, and the nested path is not a boundary for hostile or mutually untrusted workloads. See [runtime behavior](docs/runtime.md#nested-firecracker-microvms) for the lifecycle and limits.
+`create` registers the configuration. The first `start` copies the root filesystem into a private writable disk; later starts reuse that disk. Keep both original image paths available for every start. A successful start confirms that Firecracker accepted the boot request, not that the guest OS has finished booting. Omit the ID from `inspect` to see all registered microVMs.
+
+`stop` terminates Firecracker and keeps its disk. It does not ask the guest OS to shut down, so use your own guest tooling to shut down or sync writes first when persistence matters.
+
+`capabilities --json` reports KVM, cgroup controllers, Firecracker binaries, and available parent resources. Starts require enough parent CPU and memory capacity. These checks account for registered microVMs; leave room for concurrent Docker workloads too. Each microVM runs under its own unprivileged jailer identity with cgroup resource limits and bounded logs.
+
+The current microVMs have no networking, guest exec, snapshots, automatic host mounts, or Docker integration. This path is for trusted local development and is not a security boundary for hostile or mutually untrusted workloads. See [runtime behavior](docs/runtime.md#nested-firecracker-microvms) for admission limits, persistence, and recovery.
 
 ## Before using it
 
 - Containers run as Linux arm64. Rosetta and x86 emulation are disabled.
 - File contents sync through VirtioFS. Lima forwards host changes as attribute notifications; development servers that require `MODIFY` events or reliable create/rename/delete detection need polling.
 - VM upgrades, data migration, backups, and disk reclamation are manual. Keep important data backed up.
-- Local HTTPS streams HTTP/1 responses. WebSockets and CONNECT tunnels are unsupported.
+- Local HTTPS supports HTTP/1. WebSockets and CONNECT tunnels are unsupported. See [HTTPS behavior and limits](docs/https.md#behavior-and-limits).
 
 See [troubleshooting](docs/runtime.md#recovery-and-diagnostics) for common failures. Report bugs and propose changes through [GitHub issues](https://github.com/Geektrovert/luhmen/issues). Report vulnerabilities according to the [security policy](SECURITY.md).
 

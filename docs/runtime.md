@@ -34,15 +34,40 @@ The stored configuration uses this format:
   "disk_gib": 30,
   "mounts": [
     { "path": "/absolute/path/to/project", "writable": false }
-  ]
+  ],
+  "nested_virtualization": true
 }
 ```
+
+`nested_virtualization` is omitted when it is disabled. It is an opt-in creation setting and cannot be enabled on an existing VM.
 
 Use `--mount /absolute/path:rw` for writable shares or `--mount /absolute/path:ro` for read-only shares. Shares must be existing directories and cannot overlap each other or luhmen's state directory. No host directories are shared by default.
 
 VirtioFS carries file contents between the Mac and VM. Lima's experimental `mountInotify` forwards some host changes on writable mounts by updating guest file timestamps. This produces `IN_ATTRIB` notifications. Use polling in applications that require `IN_MODIFY`, deletion events, or exact create/rename behavior. See [Lima's mount documentation](https://lima-vm.io/docs/config/mount/#mount-inotify).
 
 `LUHMEN_LIMACTL` and `LUHMEN_DOCKER` select executable paths instead of `limactl` and `docker` on `PATH`. The Lima version requirement still applies.
+
+## Nested Firecracker microVMs
+
+`luhmen create --nested-virtualization` provisions the parent VM with Lima's nested virtualization setting, Firecracker 1.16.1, its jailer, and a root-owned guest manager. The host CLI talks to that manager through a forwarded Unix socket at `<state>/lima/luhmen/sock/microvmd.sock`. The host must be an Apple M3 or newer running macOS 15 or later, and the parent VM must be running before any `luhmen microvm` command.
+
+The manager accepts kernel and root filesystem paths that refer to regular files already visible inside the Lima guest. Paths must not contain whitespace, quotes, or backslashes. A create request registers a template. The first start copies the root filesystem into a private writable disk. Later starts reuse that disk and hard-link it into the jail, avoiding a second disk copy. Start waits for the Firecracker API socket and `InstanceStart` response. That reports VMM start, not guest operating-system readiness.
+
+Stop terminates the managed VMM, removes its jail, and retains the private disk. There is no guest shutdown channel on this ARM64 path. Writes already flushed by the guest persist, but stop cannot guarantee a clean filesystem shutdown. Shut down or sync the guest through your own guest tooling before stopping when needed.
+
+Example:
+
+```sh
+luhmen microvm capabilities --json
+luhmen microvm create build --kernel /mnt/project/vmlinux --rootfs /mnt/project/rootfs.ext4 --vcpus 2 --memory-mib 1024
+luhmen microvm start build --json
+luhmen microvm inspect --json
+luhmen microvm stop build
+```
+
+The manager's `capabilities --json` output reports `/dev/kvm`, cgroup-v2, Firecracker, jailer, and current parent-resource availability. `start` fails before launching if KVM or delegated cgroup controllers are unavailable. Each child gets a distinct unprivileged jailer UID/GID and cgroup CPU/memory/swap/PID limits. The manager retains up to 64 MiB of VMM output per start and drains additional output without keeping it. This does not limit writes to the guest disk.
+
+The child CPU count must fit within the remaining parent VM CPU capacity. Memory admission includes 128 MiB of VMM overhead per child and leaves at least 512 MiB for the parent. This reserve does not account for all concurrent Docker or guest workloads. This slice has no microVM networking, guest agent, guest exec, snapshots, automatic host-directory mounts, or Docker runtime integration. The manager socket is intended for trusted local development only. If the parent VM stops unexpectedly, inspect the child state after the next start and restart stale microVMs explicitly.
 
 ## Lifecycle and readiness
 
@@ -85,7 +110,7 @@ Local HTTPS uses a separate proxy in front of explicitly configured localhost po
 
 ## Recovery and diagnostics
 
-Start with `luhmen inspect --json` and `luhmen doctor --json`. Check free disk space and logs under the state directory after provisioning or boot failures. Correct missing dependencies or network problems, then retry `start`.
+Start with `luhmen inspect --json` and `luhmen doctor --json`. `doctor` reports `nested_host_ready` separately from the ordinary host check, so an M1 or M2 host can still diagnose Docker support while showing that nested Firecracker is unavailable. Check free disk space and logs under the state directory after provisioning or boot failures. Correct missing dependencies or network problems, then retry `start`.
 
 | Symptom | Next step |
 | --- | --- |

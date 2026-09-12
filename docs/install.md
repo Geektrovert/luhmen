@@ -84,7 +84,7 @@ luhmen doctor
 
 Lima and Docker plugins are separate dependencies; Cargo does not install them. `doctor` checks that the client and both plugins run, but does not enforce their selected versions. See [platforms and versions](support.md) for compatibility limits.
 
-VM creation downloads a checksum-pinned Ubuntu image. The first start installs guest packages and a checksum-pinned Docker Engine archive. Missing upstream artifacts prevent new VM preparation; use a luhmen version with updated pins. Existing VMs reuse their installed image and Engine.
+VM creation downloads a checksum-pinned Ubuntu image. The first start installs guest packages and a checksum-pinned Docker Engine archive. A VM created with `--nested-virtualization` also downloads the pinned Firecracker 1.16.1 aarch64 archive and retains its upstream notice files in the guest. Missing upstream artifacts prevent new VM preparation; use a luhmen version with updated pins. Existing VMs reuse their installed image, Engine, and Firecracker installation.
 
 ## Release archives
 

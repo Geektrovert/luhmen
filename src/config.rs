@@ -46,6 +46,12 @@ pub struct Config {
     pub memory_gib: u16,
     pub disk_gib: u16,
     pub mounts: Vec<Mount>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nested_virtualization: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Config {
@@ -223,6 +229,7 @@ mod tests {
                 path: path.clone(),
                 writable: true,
             }],
+            nested_virtualization: false,
         };
         assert!(config.validate(&path.join("state")).is_err());
     }

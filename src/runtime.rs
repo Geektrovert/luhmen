@@ -1,7 +1,7 @@
 use crate::config::{self, Config, LIMA_VERSION, NAME};
 use crate::process::Runner;
-use crate::{engine, startup, storage};
-use anyhow::{Context, Result, bail, ensure};
+use crate::{engine, microvm::MicrovmClient, startup, storage};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -38,6 +38,10 @@ pub struct Inspection {
 impl Runtime {
     pub fn socket(&self) -> PathBuf {
         self.state.join("lima/luhmen/sock/docker.sock")
+    }
+
+    pub fn microvm_socket(&self) -> PathBuf {
+        self.state.join("lima/luhmen/sock/microvmd.sock")
     }
     pub fn endpoint(&self) -> String {
         format!("unix://{}", self.socket().display())
@@ -114,6 +118,12 @@ impl Runtime {
                 "Engine socket cannot be a symlink"
             );
         }
+        if let Ok(metadata) = fs::symlink_metadata(self.microvm_socket()) {
+            ensure!(
+                !metadata.file_type().is_symlink(),
+                "microVM manager socket cannot be a symlink"
+            );
+        }
         Ok(())
     }
 
@@ -141,6 +151,11 @@ impl Runtime {
             cfg!(all(target_os = "macos", target_arch = "aarch64")),
             "VM operations require an Apple Silicon Mac running macOS 14 or later"
         );
+        ensure!(self.macos_major()? >= 14, "macOS 14 or later is required");
+        Ok(())
+    }
+
+    fn macos_major(&self) -> Result<u32> {
         let version = self
             .runner
             .run(Command::new("sw_vers").arg("-productVersion"), SHORT)?
@@ -151,7 +166,40 @@ impl Runtime {
             .next()
             .context("missing macOS version")?
             .parse()?;
-        ensure!(major >= 14, "macOS 14 or later is required");
+        Ok(major)
+    }
+
+    fn check_nested_host(&self) -> Result<()> {
+        ensure!(
+            self.macos_major()? >= 15,
+            "nested Firecracker support requires macOS 15 or later"
+        );
+        let output = self
+            .runner
+            .run(
+                Command::new("system_profiler").args(["SPHardwareDataType"]),
+                SHORT,
+            )?
+            .success("Apple Silicon chip check")?;
+        let chip = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Chip: "))
+            .context("could not determine the Apple chip model")?;
+        let generation = chip
+            .strip_prefix("Apple M")
+            .and_then(|value| {
+                value
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .context("could not determine the Apple chip generation")?;
+        ensure!(
+            generation >= 3,
+            "nested Firecracker support requires an Apple M3 or later Mac"
+        );
         Ok(())
     }
 
@@ -315,6 +363,9 @@ impl Runtime {
         self.check_host()?;
         self.check_lima()?;
         config.validate(&self.state)?;
+        if config.nested_virtualization {
+            self.check_nested_host()?;
+        }
         self.check_resources(&config)?;
         config::ensure_owned(&self.state, true)?;
         let _lock = self.lock()?;
@@ -559,9 +610,34 @@ impl Runtime {
         Ok(storage::inspect(&self.state))
     }
 
+    pub fn microvm_request(&self, client: &MicrovmClient, request: &str) -> Result<Value> {
+        let config = self.config()?;
+        ensure!(
+            config.nested_virtualization,
+            "nested virtualization is disabled; recreate the VM with `luhmen create --nested-virtualization`"
+        );
+        self.check_lima()?;
+        let vm = self
+            .vm()?
+            .context("luhmen VM does not exist; run `luhmen create --nested-virtualization`")?;
+        ensure!(
+            vm.get("status").and_then(Value::as_str) == Some("Running"),
+            "luhmen VM is not running; run `luhmen start`"
+        );
+        self.check_state_paths()?;
+        client.request(request)
+    }
+
     pub fn doctor(&self) -> Result<Value> {
         let lima = self.check_lima();
         let host = self.check_host();
+        let nested_host = if host.is_ok() {
+            self.check_nested_host()
+        } else {
+            Err(anyhow!(
+                "nested virtualization requires a supported Apple Silicon host"
+            ))
+        };
         let docker = self
             .runner
             .run(self.docker_command().args(["--version"]), SHORT)
@@ -587,6 +663,8 @@ impl Runtime {
             "schema_version": 1,
             "supported_host": host.is_ok(),
             "host_error": host.err().map(|error| format!("{error:#}")),
+            "nested_host_ready": nested_host.is_ok(),
+            "nested_host_error": nested_host.err().map(|error| format!("{error:#}")),
             "lima_version": LIMA_VERSION,
             "lima_ready": lima.is_ok(),
             "lima_error": lima.err().map(|error| format!("{error:#}")),

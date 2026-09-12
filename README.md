@@ -4,6 +4,8 @@ luhmen runs Docker Engine in a dedicated Linux VM on Apple Silicon Macs. Its Rus
 
 This is a development preview for local development. Expect CLI and configuration changes before a stable release. See [supported platforms, versions, and limits](docs/support.md).
 
+The source tree includes unreleased nested Firecracker support. Homebrew currently installs v0.1.0, which does not include that support.
+
 ## Requirements
 
 - An Apple Silicon Mac with macOS 14 or newer.
@@ -47,6 +49,22 @@ luhmen stop
 ```
 
 `luhmen create --dry-run` prints the VM configuration without creating state. See [runtime behavior](docs/runtime.md) for configuration, mounts, ports, and recovery; [storage](docs/storage.md) for disk usage; and [local HTTPS](docs/https.md) for domains and certificates.
+
+## Optional Firecracker microVMs
+
+On Apple M3 or newer running macOS 15 or later, opt into Lima's nested virtualization path when creating the VM:
+
+```sh
+luhmen create --nested-virtualization --cpus 4 --memory 4 --disk 30
+luhmen start
+luhmen microvm capabilities
+luhmen microvm create demo --kernel /path/in/the/lima-vm/vmlinux --rootfs /path/in/the/lima-vm/rootfs.ext4
+luhmen microvm start demo
+luhmen microvm inspect demo
+luhmen microvm stop demo
+```
+
+The kernel and root filesystem must already be visible inside the Lima VM. The first implementation is deliberately small: it runs Firecracker and its jailer inside the guest, supports no-network VMs, and does not provide guest exec, snapshots, automatic host mounts, or Docker integration. `luhmen microvm capabilities --json` shows KVM, cgroup, binary, and parent-resource diagnostics. Starts use per-VM unprivileged jailer identities, cgroup resource limits, and bounded logs. The parent VM must be running, and the nested path is not a boundary for hostile or mutually untrusted workloads. See [runtime behavior](docs/runtime.md#nested-firecracker-microvms) for the lifecycle and limits.
 
 ## Before using it
 

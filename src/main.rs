@@ -6,6 +6,7 @@ use luhmen::{
     cancel::Cancellation,
     config::{self, Config, Mount},
     gateway,
+    microvm::{MicrovmClient, validate_guest_path, validate_id},
     process::Runner,
     runtime::{Inspection, Runtime},
 };
@@ -39,6 +40,9 @@ enum Action {
         /// Share a directory at the same guest path. Read-only unless suffixed :rw.
         #[arg(long, value_name = "DIRECTORY[:ro|rw]")]
         mount: Vec<String>,
+        /// Enable the M3+ nested Linux/KVM path for Firecracker microVMs.
+        #[arg(long)]
+        nested_virtualization: bool,
         #[arg(long)]
         json: bool,
         /// Print the Lima configuration without creating files or a VM.
@@ -100,10 +104,60 @@ enum Action {
     },
     /// Create or print the path to the local gateway CA certificate.
     Cert,
+    /// Manage Firecracker microVMs inside the nested Linux VM.
+    Microvm {
+        #[command(subcommand)]
+        command: MicrovmAction,
+    },
 }
 #[derive(Subcommand)]
 enum ConfigAction {
     Show,
+}
+
+#[derive(Subcommand)]
+enum MicrovmAction {
+    /// Show nested virtualization and Firecracker prerequisites.
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register a no-network microVM template inside the Linux guest.
+    Create {
+        id: String,
+        /// Absolute path to an uncompressed Linux kernel inside the Lima guest.
+        #[arg(long)]
+        kernel: String,
+        /// Absolute path to an ext4 root filesystem inside the Lima guest.
+        #[arg(long)]
+        rootfs: String,
+        #[arg(long, default_value_t = 1)]
+        vcpus: u16,
+        #[arg(long, default_value_t = 512)]
+        memory_mib: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a registered microVM.
+    Start {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop a microVM and retain its overlay disk.
+    Stop {
+        id: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect one microVM, or all registered microVMs when no id is supplied.
+    Inspect {
+        id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn report(inspection: Inspection, json: bool) -> Result<()> {
@@ -145,6 +199,7 @@ fn execute(cli: Cli, cancelled: Cancellation) -> Result<()> {
             memory,
             disk,
             mount,
+            nested_virtualization,
             json,
             dry_run,
         } => {
@@ -158,6 +213,7 @@ fn execute(cli: Cli, cancelled: Cancellation) -> Result<()> {
                 memory_gib: memory,
                 disk_gib: disk,
                 mounts,
+                nested_virtualization,
             };
             if dry_run {
                 config.validate(&runtime.state)?;
@@ -237,7 +293,84 @@ fn execute(cli: Cli, cancelled: Cancellation) -> Result<()> {
             println!("{}", gateway::init(&runtime.state)?.display());
             Ok(())
         }
+        Action::Microvm { command } => {
+            config::ensure_owned(&runtime.state, false)?;
+            let client = MicrovmClient::new(runtime.microvm_socket());
+            let (request, json) = match command {
+                MicrovmAction::Capabilities { json } => ("capabilities".to_owned(), json),
+                MicrovmAction::Create {
+                    id,
+                    kernel,
+                    rootfs,
+                    vcpus,
+                    memory_mib,
+                    json,
+                } => {
+                    validate_id(&id)?;
+                    validate_guest_path(&kernel)?;
+                    validate_guest_path(&rootfs)?;
+                    let parent = runtime.config()?;
+                    ensure!(
+                        (1..=16).contains(&vcpus),
+                        "microVM vcpus must be between 1 and 16"
+                    );
+                    ensure!(
+                        (128..=16_384).contains(&memory_mib),
+                        "microVM memory must be between 128 and 16384 MiB"
+                    );
+                    ensure!(
+                        vcpus <= parent.cpus,
+                        "microVM vcpus cannot exceed the parent VM CPU count ({})",
+                        parent.cpus
+                    );
+                    ensure!(
+                        u64::from(memory_mib) + 512 <= u64::from(parent.memory_gib) * 1024,
+                        "microVM memory must leave at least 512 MiB for the parent VM"
+                    );
+                    (
+                        format!(
+                            "create id={id} kernel={kernel} rootfs={rootfs} vcpus={vcpus} memory_mib={memory_mib}"
+                        ),
+                        json,
+                    )
+                }
+                MicrovmAction::Start { id, json } => {
+                    validate_id(&id)?;
+                    (format!("start id={id}"), json)
+                }
+                MicrovmAction::Stop { id, force, json } => {
+                    validate_id(&id)?;
+                    (
+                        format!("stop id={id} force={}", if force { 1 } else { 0 }),
+                        json,
+                    )
+                }
+                MicrovmAction::Inspect { id, json } => {
+                    if let Some(id) = &id {
+                        validate_id(id)?;
+                    }
+                    let request = id
+                        .map(|id| format!("inspect id={id}"))
+                        .unwrap_or_else(|| "inspect".to_owned());
+                    (request, json)
+                }
+            };
+            let value = runtime.microvm_request(&client, &request)?;
+            print_microvm_value(value, json)
+        }
     }
+}
+
+fn print_microvm_value(value: serde_json::Value, json: bool) -> Result<()> {
+    match (json, value.as_object()) {
+        (false, Some(values)) => {
+            for (key, value) in values {
+                println!("{key}: {value}");
+            }
+        }
+        _ => println!("{}", serde_json::to_string_pretty(&value)?),
+    }
+    Ok(())
 }
 
 fn main() {

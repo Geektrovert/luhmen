@@ -9,6 +9,7 @@ These components are installed or downloaded separately. They are not included i
 | Component | Role | Upstream license and source |
 | --- | --- | --- |
 | Lima | VM lifecycle and host integration | [Apache-2.0](https://github.com/lima-vm/lima/blob/v2.2.0/LICENSE), [source](https://github.com/lima-vm/lima/tree/v2.2.0) |
+| Firecracker | Optional nested microVM VMM and jailer | [Apache-2.0](https://github.com/firecracker-microvm/firecracker/blob/v1.16.1/LICENSE), [source](https://github.com/firecracker-microvm/firecracker/tree/v1.16.1) |
 | Moby / Docker Engine | Container Engine API and daemon | [Apache-2.0](https://github.com/moby/moby/blob/master/LICENSE), [source](https://github.com/moby/moby) |
 | containerd | Container runtime | [Apache-2.0](https://github.com/containerd/containerd/blob/main/LICENSE), [source](https://github.com/containerd/containerd) |
 | BuildKit | Image builds | [Apache-2.0](https://github.com/moby/buildkit/blob/master/LICENSE), [source](https://github.com/moby/buildkit) |

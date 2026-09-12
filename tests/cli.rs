@@ -108,6 +108,120 @@ fn inspect_reports_vm_and_engine_health_separately() {
 }
 
 #[test]
+fn microvm_capabilities_uses_the_forwarded_guest_manager_socket() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.temp.path().join("state/config.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "cpus": 2,
+            "memory_gib": 2,
+            "disk_gib": 20,
+            "mounts": [],
+            "nested_virtualization": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        fixture.temp.path().join("state/lima/luhmen/status"),
+        "Running",
+    )
+    .unwrap();
+    let socket_dir = fixture.temp.path().join("state/lima/luhmen/sock");
+    fs::create_dir_all(&socket_dir).unwrap();
+    let listener = UnixListener::bind(socket_dir.join("microvmd.sock")).unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request = String::new();
+        reader.read_line(&mut request).unwrap();
+        assert_eq!(request, "capabilities\n");
+        let mut stream = stream;
+        stream
+            .write_all(b"{\"version\":1,\"ok\":true,\"data\":{\"kvm\":true}}\n")
+            .unwrap();
+    });
+    let output = fixture.run(&["microvm", "capabilities", "--json"]);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["kvm"], true);
+}
+
+#[test]
+fn microvm_arguments_cannot_inject_manager_fields() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::thread;
+
+    for arguments in [
+        vec!["microvm", "start", "foo id=bar"],
+        vec!["microvm", "stop", "foo id=bar"],
+        vec!["microvm", "inspect", "foo id=bar"],
+        vec![
+            "microvm",
+            "create",
+            "foo",
+            "--kernel",
+            "/tmp/kernel id=bar",
+            "--rootfs",
+            "/tmp/rootfs",
+        ],
+    ] {
+        let fixture = Fixture::new();
+        let root = fixture.temp.path();
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("state/config.json")).unwrap()).unwrap();
+        config["nested_virtualization"] = json!(true);
+        fs::write(
+            root.join("state/config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("state/lima/luhmen/status"), "Running").unwrap();
+        let socket_dir = root.join("state/lima/luhmen/sock");
+        fs::create_dir_all(&socket_dir).unwrap();
+        let socket = socket_dir.join("microvmd.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            if !request.is_empty() {
+                stream
+                    .write_all(b"{\"version\":1,\"ok\":true,\"data\":{\"id\":\"bar\"}}\n")
+                    .unwrap();
+            }
+            request
+        });
+        let output = fixture.run(&arguments);
+        // Wake the server after a local rejection. A valid request would already
+        // have reached it and received its response before the CLI returned.
+        let _ = UnixStream::connect(&socket);
+        let request = server.join().unwrap();
+        assert!(
+            !output.status.success(),
+            "accepted {arguments:?}: {request}"
+        );
+        assert!(
+            request.is_empty(),
+            "malformed arguments reached the manager: {request}"
+        );
+    }
+}
+
+#[test]
 fn storage_reports_sparse_files_without_calling_runtime_dependencies() {
     let fixture = Fixture::new();
     let disk = fixture.temp.path().join("state/lima/luhmen/disk");

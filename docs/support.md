@@ -19,6 +19,7 @@ luhmen is a development preview. The CLI, saved configuration, and JSON output c
 | containerd | 2.3.4, bundled with Docker Engine |
 | runc | 1.5.1, bundled with Docker Engine |
 | BuildKit | 0.33.0, bundled with Docker Engine |
+| Firecracker | 1.16.1 aarch64, nested mode only |
 | macOS deployment target | 14.0 |
 | Python for packaging | 3.11 or newer |
 
@@ -34,6 +35,9 @@ The Homebrew installation was also verified on macOS 26.6.2 with Docker CLI 29.8
 - Local HTTPS buffers HTTP/1 requests and responses. It does not support WebSockets, CONNECT, or streaming. Certificate trust is manual.
 - VPN transitions, split DNS, authenticated proxies, IPv6, UDP forwarding, and sleep/wake behavior are unverified.
 - Backups, data migration, and disk reclamation are manual.
+- Firecracker nested virtualization requires an Apple M3 or newer running macOS 15 or later and a VM created with `--nested-virtualization`. The nested VMM path has not been validated as a hostile-workload boundary.
+- Child Firecracker VMs use distinct unprivileged jailer identities, cgroup CPU/memory/swap/PID limits, parent-resource admission, and a bounded VMM log. Disk I/O throttling and durable post-crash reconciliation are not included.
+- The current Firecracker slice supports no networking, guest agent, guest exec, snapshots, automatic host mounts, or Docker integration. It reports Firecracker VMM start, not guest OS readiness.
 
 Bug reports should include the source commit or `luhmen --version`, macOS version, and redacted `luhmen doctor --json` and `luhmen inspect --json` output. Use [GitHub issues](https://github.com/Geektrovert/luhmen/issues) for bugs and feature requests and the [security policy](../SECURITY.md) for vulnerabilities.
 

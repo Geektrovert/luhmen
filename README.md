@@ -37,18 +37,42 @@ For other installation methods, see [release archives](docs/install.md#release-a
 
 Replace `$HOME/projects` with the directory you want to share, or omit `--mount` if you do not need host files. Mounts are read-only unless suffixed with `:rw`. Choose resources and mounts before creation; these settings cannot be changed afterward. Memory and disk arguments use GiB.
 
-Images, containers, and named volumes persist across VM stops and restarts. luhmen leaves Docker's active context unchanged. Use `luhmen docker ...` or `docker --context luhmen ...`.
+`luhmen create --dry-run` prints the VM configuration without creating state. See [runtime behavior](docs/runtime.md) for configuration, mounts, and recovery.
+
+## Docker containers
+
+The parent VM runs upstream Docker Engine for Linux arm64 containers. Use Dockerfiles, Compose projects, and Buildx through the Docker client on your Mac. Docker Desktop is not required.
+
+`luhmen docker ...` selects the owned Docker context and clears endpoint overrides for that command. It leaves Docker's active context unchanged. You can also select the context directly with `docker --context luhmen ...`.
+
+Run these commands from your application directory, with its Compose file and Dockerfile:
+
+```sh
+luhmen docker ps
+luhmen docker compose up -d
+luhmen docker buildx build --load -t my-app .
+```
+
+Publish application ports with `-p 127.0.0.1:8080:80` to reach a container's port 80 at `localhost:8080`. See [local HTTPS](docs/https.md) to give services local domains and certificates.
+
+Bind mounts share configured host directories through VirtioFS. Named volumes store data inside the Linux guest and suit databases, dependency directories, and build caches. Images, containers, and named volumes persist across VM stops and restarts.
+
+Docker SDKs and other clients can connect to the Engine's Unix socket. Read its URL from the context:
+
+```sh
+docker context inspect luhmen --format '{{.Endpoints.docker.Host}}'
+```
+
+Inspect or stop the parent VM with the lifecycle commands. Stopping it also stops its workloads; container restart policies determine what resumes on the next start.
 
 ```sh
 luhmen inspect --json
 luhmen storage --json
-luhmen docker compose up -d
-luhmen docker buildx build --load -t my-app .
 luhmen restart
 luhmen stop
 ```
 
-`luhmen create --dry-run` prints the VM configuration without creating state. See [runtime behavior](docs/runtime.md) for configuration, mounts, ports, and recovery; [storage](docs/storage.md) for disk usage; and [local HTTPS](docs/https.md) for domains and certificates.
+See [Docker, networking, and SDKs](docs/runtime.md#docker-networking-and-sdks) for context and builder behavior, and [storage](docs/storage.md) for disk usage.
 
 ## Firecracker microVMs
 

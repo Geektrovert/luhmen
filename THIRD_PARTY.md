@@ -24,7 +24,7 @@ VM creation downloads the Ubuntu image from Canonical first, then tries the [Nan
 
 ## Rust dependencies
 
-`Cargo.lock` pins Rust dependencies. `scripts/collect-licenses.py` reads Cargo's locked dependency metadata for the selected platform and copies the license, copyright, and notice files distributed in each dependency's source package. Binary releases include an index and these actual texts under `share/licenses/luhmen/dependencies`.
+`Cargo.lock` pins Rust dependencies. `cargo devtool collect-licenses` reads Cargo's locked dependency metadata for the selected platform and copies the license, copyright, and notice files distributed in each dependency's source package. Binary releases include an index and these actual texts under `share/licenses/luhmen/dependencies`.
 
 The published `asn1-rs-impl` 0.2.0 crate omits its upstream license texts. The `licenses/asn1-rs-impl-0.2.0` directory supplies the unchanged MIT and Apache-2.0 texts from the exact source commit recorded in that crate. Its `SOURCE` file records the upstream URLs and accompanies those texts in release packages.
 

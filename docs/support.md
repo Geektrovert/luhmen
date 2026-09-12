@@ -21,7 +21,7 @@ luhmen is a development preview. The CLI, saved configuration, and JSON output c
 | BuildKit | 0.33.0, bundled with Docker Engine |
 | Firecracker | 1.16.1 aarch64, nested mode only |
 | macOS deployment target | 14.0 |
-| Python for packaging | 3.11 or newer |
+| Rust Linux guest target | `aarch64-unknown-linux-musl` |
 
 Lima must match exactly. Other Docker client versions may work through Engine API negotiation, but compatibility is not guaranteed. The guest image and Engine archive have pinned SHA-256 hashes. Guest packages use the dated Ubuntu snapshot. Ordinary start and stop commands do not upgrade an existing VM.
 

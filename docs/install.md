@@ -38,7 +38,7 @@ If an older source installation takes precedence, `command -v luhmen` will show 
 
 ## Build from source
 
-Install the macOS Command Line Tools with `xcode-select --install`, Rust through [rustup](https://rustup.rs/), and Python 3.11 or newer. The repository's `rust-toolchain.toml` selects Rust 1.95.0. The build needs network access once to download the toolchain and locked Cargo dependencies.
+Install the macOS Command Line Tools with `xcode-select --install` and Rust through [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml` selects Rust 1.95.0 and the Linux ARM64 guest target. The build needs network access once to download the toolchain, target, and locked Cargo dependencies.
 
 Install the [Docker client and plugins](#docker-client-and-plugins), then clone and build:
 

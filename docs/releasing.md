@@ -1,10 +1,10 @@
 # Releasing
 
-Release builds require an Apple Silicon Mac, the pinned Rust toolchain, Apple's Command Line Tools, Git, and Python 3.11 or newer. The source checkout must be committed and clean. Run the checks in [contributing](../CONTRIBUTING.md), including VM integration checks, before building a release.
+Release builds require an Apple Silicon Mac, the pinned Rust toolchain with the `aarch64-unknown-linux-musl` target, Apple's Command Line Tools, and Git. The source checkout must be committed and clean. Run the checks in [contributing](../CONTRIBUTING.md), including VM integration checks, before building a release.
 
 ```sh
 ./scripts/verify-checkout.sh
-python3 scripts/release.py --output /absolute/path/to/new-release-directory
+cargo devtool release --output /absolute/path/to/new-release-directory
 ```
 
 The release script builds for `aarch64-apple-darwin` with `cargo build --release --locked`, targets macOS 14.0, strips symbols, and remaps local source paths. It collects the license files of locked Cargo dependencies for the target. Missing license text fails the release.
@@ -22,7 +22,7 @@ The script does not sign, notarize, upload, or publish artifacts. If signing or 
 Before publishing the repository or its first release:
 
 - Confirm the GitHub checks pass for the exact commit being published. A local test run does not replace the remote result.
-- Review the tracked tree and Git history for credentials, private material, and machine-specific paths. `scripts/check-source.py` checks current files for home paths; it is not a secret or history scanner.
+- Review the tracked tree and Git history for credentials, private material, and machine-specific paths. `cargo devtool check-source` checks current files for home paths; it is not a secret or history scanner.
 - Enable GitHub private vulnerability reporting and verify the route in [the security policy](../SECURITY.md). Confirm issues are available for ordinary bug reports.
 - Describe the release as a development preview. Keep [support limits](support.md) and the README consistent with the evidence, especially the unverified macOS 14 VM behavior.
 - Record live VM checks, tool versions, skipped checks, and known failures in the release notes. Include a second-machine installation check before claiming the packaged runtime works for new users.

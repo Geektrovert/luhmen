@@ -165,22 +165,22 @@ fn upstream(response: impl AsRef<[u8]>) -> (u16, JoinHandle<String>) {
 fn https_certificate_passes_openssl_strict_verification() {
     let reserved_upstream = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let gateway = Gateway::new(reserved_upstream.local_addr().unwrap().port());
-    let result = std::process::Command::new("python3")
+    let result = std::process::Command::new("openssl")
         .args([
-            "-c",
-            r#"
-import socket, ssl, sys
-context = ssl.create_default_context(cafile=sys.argv[1])
-context.verify_flags |= ssl.VERIFY_X509_STRICT
-with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=5) as stream:
-    with context.wrap_socket(stream, server_hostname="app.localhost") as tls:
-        assert tls.getpeercert()["subjectAltName"] == (("DNS", "app.localhost"),)
-"#,
+            "s_client",
+            "-verify_return_error",
+            "-x509_strict",
+            "-verify_hostname",
+            "app.localhost",
+            "-servername",
+            "app.localhost",
+            "-CAfile",
         ])
         .arg(gateway.directory.path().join("gateway-ca/ca.pem"))
-        .arg(gateway.port.to_string())
+        .args(["-connect", &format!("127.0.0.1:{}", gateway.port)])
+        .stdin(std::process::Stdio::null())
         .output()
-        .expect("Python 3 with OpenSSL is required for the TLS interoperability test");
+        .expect("OpenSSL is required for the TLS interoperability test");
     assert!(
         result.status.success(),
         "strict TLS verification failed: {}",

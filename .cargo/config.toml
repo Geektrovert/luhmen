@@ -1,0 +1,2 @@
+[alias]
+devtool = "run --quiet --features devtools --bin luhmen-devtool --"

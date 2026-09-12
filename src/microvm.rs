@@ -241,8 +241,8 @@ mod tests {
         fs::write(root.join("helper.sh"), helper).unwrap();
         fs::create_dir(root.join("run")).unwrap();
         fs::create_dir(root.join("bin")).unwrap();
-        // This protocol test serves one request at a time. Lifecycle and lock
-        // ownership are covered by the guest manager's separate process tests.
+        // This protocol test serves one request at a time without pretending
+        // to provide KVM, cgroup, or jailer behavior.
         let flock = root.join("bin/flock");
         fs::write(&flock, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&flock, fs::Permissions::from_mode(0o755)).unwrap();

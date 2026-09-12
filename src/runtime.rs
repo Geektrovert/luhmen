@@ -628,7 +628,7 @@ impl Runtime {
                         "sudo",
                         "/bin/sh",
                         "-c",
-                        include_str!("../scripts/docker-shutdown.sh"),
+                        "trap '' HUP INT TERM; exec /usr/bin/flock --nonblock /run/luhmen-docker-shutdown.lock /usr/local/libexec/luhmen-docker-shutdown",
                     ]),
                     Duration::from_secs(180),
                 )

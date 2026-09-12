@@ -1,3 +1,3 @@
 /target/
+/guest/target/
 /dist/
-__pycache__/

@@ -121,7 +121,7 @@ See [troubleshooting](docs/runtime.md#recovery-and-diagnostics) for common failu
 
 ## Build and contribute
 
-Source builds require Rust 1.95.0 through [rustup](https://rustup.rs/), Apple's Command Line Tools, and Python 3.11 or newer. See [source installation](docs/install.md#build-from-source).
+Source builds require Rust 1.95.0 through [rustup](https://rustup.rs/), the `aarch64-unknown-linux-musl` Rust target, and Apple's Command Line Tools. See [source installation](docs/install.md#build-from-source).
 
 Run these checks from a source checkout. Binary release archives do not contain the build scripts or Rust source.
 

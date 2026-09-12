@@ -62,6 +62,7 @@ pub fn render(config: &Config) -> Result<String> {
         json!({ "mode": "dependency", "skipDefaultDependencyResolution": false, "script": dependencies }),
         json!({ "mode": "data", "path": "/etc/docker/daemon.json", "content": "{\"data-root\":\"/var/lib/docker\",\"log-driver\":\"local\",\"live-restore\":true,\"features\":{\"containerd-snapshotter\":true}}\n", "owner": "root:root", "permissions": "0600" }),
         json!({ "mode": "data", "path": "/usr/local/libexec/luhmen-docker-config-signature", "content": DOCKER_CONFIG_SIGNATURE, "owner": "root:root", "permissions": "0755" }),
+        json!({ "mode": "data", "path": "/usr/local/libexec/luhmen-docker-shutdown.b64", "content": DOCKER_SHUTDOWN_BASE64, "owner": "root:root", "permissions": "0600" }),
         json!({ "mode": "data", "path": "/etc/systemd/system/docker.socket", "content": DOCKER_SOCKET, "owner": "root:root", "permissions": "0644" }),
         json!({ "mode": "data", "path": "/etc/systemd/system/docker.service", "content": DOCKER_SERVICE, "owner": "root:root", "permissions": "0644" }),
         json!({ "mode": "system", "script": install }),
@@ -183,9 +184,9 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 Snapshot: no
 SOURCES
 rm -f /etc/apt/apt.conf.d/50-luhmen-snapshot
-if ! command -v iptables >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1@MICROVM_CHECK@; then
+if ! command -v iptables >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1@MICROVM_CHECK@; then
     apt-get update -o APT::Update::Error-Mode=any
-    apt-get install -y --no-install-recommends iptables nftables rsync curl ca-certificates util-linux python3@MICROVM_PACKAGES@
+    apt-get install -y --no-install-recommends iptables nftables rsync curl ca-certificates util-linux@MICROVM_PACKAGES@
 fi
 "#;
 
@@ -252,6 +253,9 @@ const MICROVM_HELPER: &str = include_str!("../scripts/microvmd.sh");
 
 const DOCKER_CONFIG_SIGNATURE: &str = include_str!("../scripts/docker-config-signature.sh");
 
+const DOCKER_SHUTDOWN_BASE64: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/luhmen-docker-shutdown.b64"));
+
 const DOCKER_SOCKET: &str = r#"[Unit]
 Description=Docker Engine API socket
 
@@ -299,6 +303,14 @@ WantedBy=multi-user.target
 
 const INSTALL_DOCKER: &str = r#"#!/bin/sh
 set -eu
+shutdown_binary=/usr/local/libexec/luhmen-docker-shutdown
+shutdown_encoded="$shutdown_binary.b64"
+shutdown_stage=$(mktemp /usr/local/libexec/.luhmen-docker-shutdown.XXXXXX)
+trap 'rm -f "$shutdown_stage"' EXIT HUP INT TERM
+base64 --decode "$shutdown_encoded" > "$shutdown_stage"
+chmod 0755 "$shutdown_stage"
+mv "$shutdown_stage" "$shutdown_binary"
+trap - EXIT HUP INT TERM
 install_root=/opt/luhmen/docker/@VERSION@
 install -d -m 0755 /opt/luhmen/docker
 for abandoned in /opt/luhmen/docker/.install.*; do

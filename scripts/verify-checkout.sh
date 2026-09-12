@@ -16,6 +16,7 @@ cd "$work/source"
 export CARGO_TARGET_DIR="$work/target"
 python3 scripts/check-source.py
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked

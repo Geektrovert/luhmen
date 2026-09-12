@@ -1,6 +1,6 @@
 use super::*;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener as StdListener, TcpStream as StdStream};
+use std::net::{TcpListener as StdListener, TcpStream as StdStream};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -93,13 +93,8 @@ impl Gateway {
     fn request(&self, hostname: &'static str, request: &str) -> String {
         let mut stream = self.tls(hostname);
         stream.write_all(request.as_bytes()).unwrap();
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .unwrap_or_else(|error| {
-                panic!("TLS response read failed: {error}; response: {response:?}")
-            });
-        response
+        read_http_response(&mut stream)
+            .unwrap_or_else(|error| panic!("TLS response read failed: {error}"))
     }
 }
 
@@ -147,14 +142,7 @@ fn upstream(response: impl AsRef<[u8]>) -> (u16, JoinHandle<String>) {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut received = Vec::new();
-        let mut byte = [0; 1];
-        while !received.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte).unwrap();
-            received.push(byte[0]);
-            assert!(received.len() < 32768);
-        }
-        let header = String::from_utf8(received.clone()).unwrap();
+        let header = read_http_headers(&mut stream).unwrap();
         let length: usize = header
             .lines()
             .find_map(|line| {
@@ -165,6 +153,7 @@ fn upstream(response: impl AsRef<[u8]>) -> (u16, JoinHandle<String>) {
             .unwrap_or(0);
         let mut body = vec![0; length];
         stream.read_exact(&mut body).unwrap();
+        let mut received = header.into_bytes();
         received.extend(body);
         stream.write_all(&response).unwrap();
         String::from_utf8(received).unwrap()
@@ -247,6 +236,14 @@ fn gateway_rejects_unknown_sni_mismatched_hosts_and_proxy_requests() {
         ),
     );
     assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+    let reply = gateway.request(
+        "app.localhost",
+        &format!(
+            "OPTIONS * HTTP/1.1\r\nHost: app.localhost:{}\r\n\r\n",
+            gateway.port
+        ),
+    );
+    assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
     let reply = gateway.request("app.localhost", &format!("GET / HTTP/1.1\r\nHost: app.localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", gateway.port));
     assert!(reply.starts_with("HTTP/1.1 501"), "{reply}");
     reserved_upstream.set_nonblocking(true).unwrap();
@@ -276,8 +273,6 @@ fn restart_preserves_ca_and_reports_unavailable_upstreams() {
             .starts_with("HTTP/1.1 502")
     );
     gateway.stop();
-    let bound = StdListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, gateway.port))).unwrap();
-    drop(bound);
     gateway.start();
     assert_eq!(fs::read(ca_path).unwrap(), ca);
     assert!(
@@ -354,9 +349,8 @@ fn oversized_bodies_are_rejected_without_unbounded_buffering() {
     reserved_upstream.set_nonblocking(true).unwrap();
     assert!(reserved_upstream.accept().is_err());
     let (port, upstream) = upstream(format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     ));
     let gateway = Gateway::new(port);
     assert!(
@@ -393,7 +387,7 @@ fn slow_uploads_reject_overload_and_release_capacity_on_completion() {
     let (port, upstream) = upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
     let gateway = Gateway::new(port);
     let mut uploads = Vec::new();
-    for _ in 0..MAX_BUFFERED_EXCHANGES {
+    for _ in 0..MAX_EXCHANGES {
         let mut stream = gateway.tls("app.localhost");
         write!(
             stream,
@@ -402,14 +396,9 @@ fn slow_uploads_reject_overload_and_release_capacity_on_completion() {
         )
         .unwrap();
         // Continue is sent only after the handler starts reading the body.
-        let mut headers = Vec::new();
-        while !headers.ends_with(b"\r\n\r\n") {
-            let mut byte = [0];
-            stream.read_exact(&mut byte).unwrap();
-            headers.push(byte[0]);
-            assert!(headers.len() < 1024);
-        }
-        assert!(headers.starts_with(b"HTTP/1.1 100"));
+        let headers = read_http_headers(&mut stream).unwrap();
+        assert!(headers.len() < 1024);
+        assert!(headers.starts_with("HTTP/1.1 100"));
         uploads.push(stream);
     }
     let request = format!(
@@ -421,8 +410,7 @@ fn slow_uploads_reject_overload_and_release_capacity_on_completion() {
 
     let mut completed = uploads.pop().unwrap();
     completed.write_all(b"x").unwrap();
-    let mut reply = String::new();
-    completed.read_to_string(&mut reply).unwrap();
+    let reply = read_http_response(&mut completed).unwrap();
     assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
     assert!(upstream.join().unwrap().ends_with('x'));
 
@@ -437,11 +425,23 @@ fn slow_uploads_reject_overload_and_release_capacity_on_completion() {
 async fn slow_response_writes_hold_reservations_until_disconnect() {
     use tokio::io::AsyncReadExt;
 
-    let (port, upstream) = upstream(format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-        MAX_BODY_BYTES,
-        "x".repeat(MAX_BODY_BYTES)
-    ));
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_http_headers(&mut stream).unwrap();
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                MAX_BODY_BYTES,
+                "x".repeat(MAX_BODY_BYTES)
+            )
+            .as_bytes(),
+        )
+    });
     let directory = tempfile::tempdir().unwrap();
     let config = Arc::new(Config {
         listen_port: 8443,
@@ -460,6 +460,8 @@ async fn slow_response_writes_hold_reservations_until_disconnect() {
         acceptor.clone(),
         config.clone(),
         buffers.clone(),
+        upstream_client(),
+        Cancellation::new(),
     ));
     let mut slow = connector
         .connect("app.localhost".try_into().unwrap(), client)
@@ -480,6 +482,8 @@ async fn slow_response_writes_hold_reservations_until_disconnect() {
         acceptor,
         config,
         buffers.clone(),
+        upstream_client(),
+        Cancellation::new(),
     ));
     let mut extra = connector
         .connect("app.localhost".try_into().unwrap(), client)
@@ -506,5 +510,330 @@ async fn slow_response_writes_hold_reservations_until_disconnect() {
         .unwrap();
     drop(released);
     assert_eq!(buffers.available_permits(), 1);
+    assert!(
+        upstream.join().unwrap().is_err(),
+        "slow client must backpressure the upstream before all 8 MiB are read"
+    );
+}
+
+fn read_http_headers(stream: &mut impl Read) -> std::io::Result<String> {
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+        assert!(headers.len() < 32768);
+    }
+    Ok(String::from_utf8(headers).unwrap())
+}
+
+fn read_http_response(stream: &mut impl Read) -> std::io::Result<String> {
+    let headers = read_http_headers(stream)?;
+    let mut body = Vec::new();
+    if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        loop {
+            let mut line = Vec::new();
+            while !line.ends_with(b"\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte)?;
+                line.push(byte[0]);
+            }
+            let length =
+                usize::from_str_radix(std::str::from_utf8(&line).unwrap().trim(), 16).unwrap();
+            if length == 0 {
+                stream.read_exact(&mut [0; 2])?;
+                break;
+            }
+            let start = body.len();
+            body.resize(start + length, 0);
+            stream.read_exact(&mut body[start..])?;
+            stream.read_exact(&mut [0; 2])?;
+        }
+    } else if let Some(length) = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().unwrap())
+    }) {
+        body.resize(length, 0);
+        stream.read_exact(&mut body)?;
+    } else {
+        stream.read_to_end(&mut body)?;
+    }
+    Ok(headers + std::str::from_utf8(&body).unwrap())
+}
+
+#[test]
+fn https_streams_first_chunk_before_upstream_finishes() {
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release, released) = std::sync::mpsc::channel();
+    let upstream = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_http_headers(&mut stream).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+            .unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+        let _ = stream.write_all(b"5\r\nworld\r\n0\r\n\r\n");
+    });
+    let gateway = Gateway::new(port);
+    let mut stream = gateway.tls("app.localhost");
+    stream
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: app.localhost:{}\r\nConnection: close\r\n\r\n",
+        gateway.port
+    )
+    .unwrap();
+    let mut received = Vec::new();
+    let first_chunk = loop {
+        let mut byte = [0];
+        match stream.read_exact(&mut byte) {
+            Ok(()) => received.push(byte[0]),
+            Err(error) => break Err(error),
+        }
+        if received.ends_with(b"hello") {
+            break Ok(());
+        }
+    };
+    release.send(()).unwrap();
     upstream.join().unwrap();
+    assert!(
+        first_chunk.is_ok(),
+        "first chunk was buffered until completion: {first_chunk:?}"
+    );
+    stream
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.read_to_end(&mut received).unwrap();
+    assert!(received.windows(5).any(|bytes| bytes == b"world"));
+}
+
+#[test]
+fn https_reuses_client_and_upstream_connections() {
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        for _ in 0..3 {
+            read_http_headers(&mut stream)?;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")?;
+        }
+        Ok::<_, std::io::Error>(())
+    });
+    let gateway = Gateway::new(port);
+    let mut stream = gateway.tls("app.localhost");
+    for index in 0..2 {
+        write!(
+            stream,
+            "GET /{index} HTTP/1.1\r\nHost: app.localhost:{}\r\n\r\n",
+            gateway.port
+        )
+        .unwrap();
+        let headers = read_http_headers(&mut stream).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+        assert!(
+            !headers.to_ascii_lowercase().contains("connection: close"),
+            "successful responses must keep the client connection alive: {headers}"
+        );
+        let mut body = [0; 2];
+        stream.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"OK");
+    }
+    drop(stream);
+    let reply = gateway.request(
+        "app.localhost",
+        &format!(
+            "GET /third HTTP/1.1\r\nHost: app.localhost:{}\r\n\r\n",
+            gateway.port
+        ),
+    );
+    assert!(reply.ends_with("OK"), "{reply}");
+    assert!(
+        upstream.join().unwrap().is_ok(),
+        "requests from both TLS clients must reuse the same upstream connection"
+    );
+}
+
+#[test]
+fn streamed_body_limit_closes_incomplete_response() {
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_http_headers(&mut stream).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .unwrap();
+        let chunk = format!("100000\r\n{}\r\n", "x".repeat(1024 * 1024));
+        for _ in 0..9 {
+            if stream.write_all(chunk.as_bytes()).is_err() {
+                return;
+            }
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+    });
+    let gateway = Gateway::new(port);
+    let mut stream = gateway.tls("app.localhost");
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: app.localhost:{}\r\n\r\n",
+        gateway.port
+    )
+    .unwrap();
+    let headers = read_http_headers(&mut stream).unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    let mut body = Vec::new();
+    // A body error after headers must terminate HTTP and TLS, not send a second
+    // status or a final chunk that would make the truncated response look valid.
+    let _ = stream.read_to_end(&mut body);
+    let payload_bytes = body.iter().filter(|byte| **byte == b'x').count();
+    assert!(payload_bytes > 0 && payload_bytes <= MAX_BODY_BYTES);
+    assert!(!body.ends_with(b"\r\n0\r\n\r\n"));
+    upstream.join().unwrap();
+}
+
+#[test]
+fn closing_upstreams_reconnect_and_idle_clients_shutdown_promptly() {
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            read_http_headers(&mut stream).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+        }
+    });
+    let mut gateway = Gateway::new(port);
+    let mut stream = gateway.tls("app.localhost");
+    for _ in 0..2 {
+        write!(
+            stream,
+            "GET / HTTP/1.1\r\nHost: app.localhost:{}\r\n\r\n",
+            gateway.port
+        )
+        .unwrap();
+        assert!(read_http_response(&mut stream).unwrap().ends_with("OK"));
+    }
+    upstream.join().unwrap();
+    let started = Instant::now();
+    gateway.stop();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "idle keep-alive clients must not wait for the five-second drain deadline"
+    );
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streamed_response_deadline_cancels_a_stalled_upstream() {
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release, released) = std::sync::mpsc::channel();
+    let upstream = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_http_headers(&mut stream).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+            .unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let capacity = Arc::new(Semaphore::new(1));
+    let reservation = Arc::new(capacity.clone().acquire_owned().await.unwrap());
+    let request = Request::builder()
+        .uri(format!("http://127.0.0.1:{port}/"))
+        .body(GatewayBody::buffered(Bytes::new(), None))
+        .unwrap();
+    let response = exchange(
+        &upstream_client(),
+        request,
+        false,
+        reservation,
+        tokio::time::Instant::now() + Duration::from_millis(500),
+    )
+    .await
+    .unwrap();
+    let mut body = response.into_body();
+    assert_eq!(
+        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+        "hello"
+    );
+    let error = timeout(Duration::from_secs(2), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    drop(body);
+    assert_eq!(capacity.available_permits(), 1);
+    release.send(()).unwrap();
+    upstream.join().unwrap();
+}
+
+#[tokio::test]
+async fn stalled_upstream_upload_keeps_its_buffer_reserved() {
+    let listener = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ready, headers_received) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let upstream = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_http_headers(&mut stream).unwrap();
+        ready.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let capacity = Arc::new(Semaphore::new(1));
+    let reservation = Arc::new(capacity.clone().acquire_owned().await.unwrap());
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("http://127.0.0.1:{port}/"))
+        .body(GatewayBody::buffered(
+            Bytes::from(vec![b'x'; MAX_BODY_BYTES]),
+            Some(reservation),
+        ))
+        .unwrap();
+    let pending = tokio::spawn(upstream_client().request(request));
+    timeout(Duration::from_secs(5), headers_received)
+        .await
+        .unwrap()
+        .unwrap();
+    // The upstream has read only headers. TCP cannot buffer all 8 MiB, so Hyper
+    // still owns upload bytes even after the Body yielded its final frame.
+    let reserved = capacity.available_permits();
+    pending.abort();
+    let _ = pending.await;
+    release.send(()).unwrap();
+    upstream.join().unwrap();
+    assert_eq!(reserved, 0, "in-flight upload bytes lost their reservation");
+    let _released = timeout(Duration::from_secs(2), capacity.acquire())
+        .await
+        .unwrap()
+        .unwrap();
 }

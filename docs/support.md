@@ -32,7 +32,7 @@ The Homebrew installation was also verified on macOS 26.6.2 with Docker CLI 29.8
 - The guest and containers use Linux arm64. Rosetta and x86 emulation are disabled; use images with an arm64 variant.
 - CPU, memory, disk, and mount settings are fixed at VM creation.
 - Writable mount event forwarding is experimental. Host changes produce `IN_ATTRIB` notifications; `IN_MODIFY` and exact create/rename/delete event sequences are not guaranteed. Use application polling for complete change detection.
-- Local HTTPS buffers HTTP/1 requests and responses. It does not support WebSockets, CONNECT, or streaming. Certificate trust is manual.
+- Local HTTPS buffers HTTP/1 uploads and streams responses, with body-size and time limits. It does not support WebSockets or CONNECT. Certificate trust is manual.
 - VPN transitions, split DNS, authenticated proxies, IPv6, UDP forwarding, and sleep/wake behavior are unverified.
 - Backups, data migration, and disk reclamation are manual.
 - Firecracker nested virtualization requires an Apple M3 or newer running macOS 15 or later and a VM created with `--nested-virtualization`. The nested VMM path has not been validated as a hostile-workload boundary.

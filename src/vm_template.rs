@@ -61,6 +61,7 @@ pub fn render(config: &Config) -> Result<String> {
         json!({ "mode": "boot", "script": SYSTEMD_LOGIND_COMPAT }),
         json!({ "mode": "dependency", "skipDefaultDependencyResolution": false, "script": dependencies }),
         json!({ "mode": "data", "path": "/etc/docker/daemon.json", "content": "{\"data-root\":\"/var/lib/docker\",\"log-driver\":\"local\",\"live-restore\":true,\"features\":{\"containerd-snapshotter\":true}}\n", "owner": "root:root", "permissions": "0600" }),
+        json!({ "mode": "data", "path": "/usr/local/libexec/luhmen-docker-config-signature", "content": DOCKER_CONFIG_SIGNATURE, "owner": "root:root", "permissions": "0755" }),
         json!({ "mode": "data", "path": "/etc/systemd/system/docker.socket", "content": DOCKER_SOCKET, "owner": "root:root", "permissions": "0644" }),
         json!({ "mode": "data", "path": "/etc/systemd/system/docker.service", "content": DOCKER_SERVICE, "owner": "root:root", "permissions": "0644" }),
         json!({ "mode": "system", "script": install }),
@@ -182,9 +183,9 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 Snapshot: no
 SOURCES
 rm -f /etc/apt/apt.conf.d/50-luhmen-snapshot
-if ! command -v iptables >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1@MICROVM_CHECK@; then
+if ! command -v iptables >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1@MICROVM_CHECK@; then
     apt-get update -o APT::Update::Error-Mode=any
-    apt-get install -y --no-install-recommends iptables nftables rsync curl ca-certificates util-linux@MICROVM_PACKAGES@
+    apt-get install -y --no-install-recommends iptables nftables rsync curl ca-certificates util-linux python3@MICROVM_PACKAGES@
 fi
 "#;
 
@@ -249,6 +250,8 @@ const MICROVMD_LAUNCHER: &str = include_str!("../scripts/microvmd-service.sh");
 
 const MICROVM_HELPER: &str = include_str!("../scripts/microvmd.sh");
 
+const DOCKER_CONFIG_SIGNATURE: &str = include_str!("../scripts/docker-config-signature.sh");
+
 const DOCKER_SOCKET: &str = r#"[Unit]
 Description=Docker Engine API socket
 
@@ -257,6 +260,9 @@ ListenStream=/var/run/docker.sock
 SocketMode=0600
 SocketUser={{.User}}
 RemoveOnStop=true
+ExecStartPre=/usr/local/libexec/luhmen-docker-config-signature prepare socket
+ExecStartPost=/usr/local/libexec/luhmen-docker-config-signature commit socket
+ExecStopPost=/usr/local/libexec/luhmen-docker-config-signature clear socket
 
 [Install]
 WantedBy=sockets.target
@@ -272,7 +278,10 @@ Wants=network-online.target
 Type=notify
 Environment=PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-/etc/environment
+ExecStartPre=/usr/local/libexec/luhmen-docker-config-signature prepare service
 ExecStart=/usr/local/bin/dockerd --host=fd:// --config-file=/etc/docker/daemon.json
+ExecStartPost=/usr/local/libexec/luhmen-docker-config-signature commit service
+ExecStopPost=/usr/local/libexec/luhmen-docker-config-signature clear service
 ExecReload=/bin/kill -s HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
@@ -319,9 +328,24 @@ for binary in docker dockerd containerd containerd-shim-runc-v2 ctr runc docker-
     ln -sfn "$install_root/$binary" "/usr/local/bin/$binary"
 done
 systemctl daemon-reload
-systemctl enable --now docker.socket
-systemctl enable docker.service
-systemctl restart docker.service
+systemctl enable docker.socket docker.service
+# The unit hooks record what this service instance actually loaded, including
+# on a warm boot before Lima rewrites its data files.
+helper=/usr/local/libexec/luhmen-docker-config-signature
+socket_signature=$("$helper" signature socket)
+service_signature=$("$helper" signature service)
+if [ "$(cat /run/luhmen-docker/socket.active 2>/dev/null || true)" != "$socket_signature" ]; then
+    dockerd --validate --config-file=/etc/docker/daemon.json
+    # Stop both in one transaction: Docker closes its inherited descriptor
+    # before systemd replaces the listener, and traffic cannot reactivate it.
+    systemctl stop docker.service docker.socket
+    systemctl start docker.socket docker.service
+elif [ "$(cat /run/luhmen-docker/service.active 2>/dev/null || true)" != "$service_signature" ]; then
+    dockerd --validate --config-file=/etc/docker/daemon.json
+    systemctl restart docker.service
+else
+    systemctl start docker.socket docker.service
+fi
 "#;
 
 #[cfg(test)]

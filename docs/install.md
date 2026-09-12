@@ -122,7 +122,15 @@ brew upgrade Geektrovert/tap/luhmen
 
 Rebuilding and rerunning the source installer replaces the CLI in the chosen prefix.
 
-Updating the CLI does not upgrade an existing VM's guest image, package snapshot, or Docker Engine. There is no automatic VM upgrade or migration command. Read the version's release notes before updating and back up persistent data before any manual VM replacement.
+Replacing the CLI leaves an existing VM's saved provisioning unchanged. To apply the installed CLI's provisioning fixes, stop the VM and update it explicitly:
+
+```sh
+luhmen stop
+luhmen update
+luhmen start
+```
+
+`update` is available in the unreleased source tree. It replaces only provisioning, preserving the VM disk, base image, CPU, memory, mounts, and networking settings. The next start applies the current scripts and installs the selected Engine or helper version when needed. It does not replace the guest OS image or upgrade every guest package. Edited or unrecognized Lima templates are refused. If updating is interrupted between template writes, rerun the same CLI version before upgrading again.
 
 ## Uninstall
 

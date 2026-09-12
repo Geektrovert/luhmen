@@ -6,6 +6,7 @@ use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,6 +34,41 @@ pub struct Inspection {
     pub vm: Option<Value>,
     pub errors: Vec<String>,
     pub last_start: Option<startup::Report>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProvisionUpdate {
+    pub schema_version: u32,
+    pub name: &'static str,
+    pub state: &'static str,
+    pub updated: bool,
+}
+
+fn read_vm_template(path: &Path) -> Result<Value> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("read saved VM template {}", path.display()))?;
+    ensure!(
+        metadata.is_file(),
+        "VM template must be a regular file: {}",
+        path.display()
+    );
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 1024 * 1024, "VM template exceeds 1 MiB");
+    let document: Value = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "VM template is not the saved luhmen JSON format: {}",
+            path.display()
+        )
+    })?;
+    ensure!(
+        document.is_object() && document["provision"].is_array(),
+        "VM template is not the saved luhmen JSON format: {}",
+        path.display()
+    );
+    Ok(document)
 }
 
 impl Runtime {
@@ -409,6 +445,86 @@ impl Runtime {
         self.inspect()
     }
 
+    /// Refresh owned provisioning while preserving the existing VM and its settings.
+    pub fn update(&self) -> Result<ProvisionUpdate> {
+        config::ensure_owned(&self.state, false)?;
+        let _lock = self.lock()?;
+        self.check_lima()?;
+        self.require_stopped_for_update()?;
+        let config = self.config()?;
+        let baseline_path = self.state.join("vm.yaml");
+        let vm_dir = self.state.join("lima/luhmen");
+        let actual_path = vm_dir.join("lima.yaml");
+        let baseline = read_vm_template(&baseline_path)?;
+        let actual = read_vm_template(&actual_path)?;
+        let current: Value = serde_json::from_str(&crate::vm_template::render(&config)?)?;
+        for field in ["cpus", "memory", "disk", "mounts", "arch", "vmType"] {
+            ensure!(
+                baseline[field] == current[field],
+                "saved VM template {field} differs from the creation settings; templates were preserved"
+            );
+        }
+        ensure!(
+            baseline["nestedVirtualization"].as_bool().unwrap_or(false)
+                == config.nested_virtualization,
+            "saved VM template nested virtualization differs from the creation settings; templates were preserved"
+        );
+        let mut candidate = baseline.clone();
+        candidate["provision"] = current["provision"].clone();
+        // Publish the actual VM template first. If the baseline write was
+        // interrupted, the same CLI can recognize and finish this exact update.
+        ensure!(
+            actual == baseline || actual == candidate,
+            "VM template differs from the saved luhmen template; refusing to replace user edits"
+        );
+        let updated = actual != candidate || baseline != candidate;
+        if updated {
+            let bytes = serde_json::to_vec_pretty(&candidate)?;
+            let mut staged = tempfile::Builder::new()
+                .prefix("luhmen-update-")
+                .suffix(".yaml")
+                .tempfile_in(&vm_dir)?;
+            staged.write_all(&bytes)?;
+            staged.as_file().sync_all()?;
+            self.runner
+                .run(self.lima().arg("validate").arg(staged.path()), SHORT)?
+                .success("updated VM provisioning validation")?;
+            // Validate can take time. Detect an external edit or VM start before
+            // publishing, even though luhmen lifecycle commands share our lock.
+            self.check_state_paths()?;
+            ensure!(
+                read_vm_template(&actual_path)? == actual
+                    && read_vm_template(&baseline_path)? == baseline
+                    && self.config()? == config,
+                "VM template changed during validation; templates were preserved"
+            );
+            self.require_stopped_for_update()?;
+            if actual != candidate {
+                config::atomic_write(&actual_path, &bytes)?;
+            }
+            if baseline != candidate {
+                config::atomic_write(&baseline_path, &bytes).context(
+                    "VM provisioning was updated but saving its baseline failed; rerun `luhmen update` with this CLI version before upgrading again"
+                )?;
+            }
+        }
+        Ok(ProvisionUpdate {
+            schema_version: 1,
+            name: NAME,
+            state: "Stopped",
+            updated,
+        })
+    }
+
+    fn require_stopped_for_update(&self) -> Result<()> {
+        let vm = self.vm()?.context("luhmen VM does not exist")?;
+        ensure!(
+            vm.get("status").and_then(Value::as_str) == Some("Stopped"),
+            "VM must be stopped before updating provisioning; run `luhmen stop` first"
+        );
+        Ok(())
+    }
+
     pub fn start(&self) -> Result<Inspection> {
         self.check_host()?;
         config::ensure_owned(&self.state, false)?;
@@ -500,6 +616,25 @@ impl Runtime {
             status == "Running" || force,
             "VM is {status:?}; graceful stop is unavailable; use `luhmen stop --force` after inspecting its logs"
         );
+        if !force {
+            // Stop the daemon before Lima starts VZ's 30-second power-off
+            // deadline. Daemon shutdown preserves container restart policies.
+            self.runner
+                .run(
+                    self.lima().args([
+                        "shell",
+                        NAME,
+                        "--",
+                        "sudo",
+                        "/bin/sh",
+                        "-c",
+                        include_str!("../scripts/docker-shutdown.sh"),
+                    ]),
+                    Duration::from_secs(180),
+                )
+                .and_then(|output| output.success("graceful Docker shutdown"))
+                .context("Docker could not stop gracefully; VM power-off was not requested; inspect the guest before retrying or using `luhmen stop --force`")?;
+        }
         let mut command = self.lima();
         command.arg("stop");
         if force {

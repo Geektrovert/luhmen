@@ -10,6 +10,8 @@ Changing `LUHMEN_HOME` alone does not create a separate Docker context namespace
 
 The VM disk contains Docker images, containers, BuildKit cache, and named volumes. Stopping or restarting the VM preserves that disk. A bind mount exposes a host directory and stores its contents on the host instead.
 
+Bind-mount source files that your Mac editor needs. Keep dependency directories and build caches in named volumes when they do not need direct host access. Those reads stay inside the Linux guest instead of crossing VirtioFS.
+
 Lima uses `$HOME/Library/Caches/lima` for downloaded images, metadata, and converted disks. Other Lima installations can use this cache. luhmen does not remove it.
 
 ## Configuration
@@ -77,9 +79,11 @@ Start and restart print elapsed milliseconds for `preflight`, `lima_start`, and 
 
 `inspect --json` includes the saved attempt under `last_start`, with stages marked `running`, `complete`, `failed`, or `skipped`. An interrupted command can leave a stage marked `running`. Report write failures produce warnings; invalid reports appear in inspection errors. Use live readiness fields to check current health.
 
-`stop` requests a graceful guest shutdown. `restart` stops and starts the same VM. Docker restart policies determine which containers resume. The VM disk persists in both cases.
+`stop` first shuts down Docker, then requests guest shutdown. Docker gets its own stop window before Lima's 30-second VZ shutdown timer begins. Container stop timeouts apply within the Docker service's 120-second limit. A failed Docker shutdown leaves the VM running and reports an error. `restart` stops and starts the same VM. Docker restart policies determine which containers resume. The VM disk persists in both cases.
 
-New VMs enable Docker's [live restore](https://docs.docker.com/engine/daemon/live-restore/) so running containers can survive a Docker daemon failure. The guest service restarts the daemon automatically. Live restore does not keep containers running through a VM shutdown or guarantee recovery after daemon configuration changes.
+`update` refreshes provisioning on a stopped VM after a CLI upgrade. It validates the proposed template through Lima and preserves all settings outside provisioning. It refuses edited templates. Run `start` afterward to apply the scripts. An unchanged warm boot reuses Docker's already-started daemon; changed service configuration or socket settings trigger the required restart.
+
+New VMs enable Docker's [live restore](https://docs.docker.com/engine/daemon/live-restore/) so running containers can survive a Docker daemon failure. The guest service restarts the daemon automatically. Before an intentional VM stop, luhmen temporarily disables live restore in the running daemon so Docker can stop containers without marking them manually stopped. It restores the original configuration file before waiting for Docker to exit. The guest pre-stop script uses Python's standard library for JSON and file handling; the pinned guest image includes Python. A failed or interrupted preparation retains recovery information for the next stop attempt. Live restore does not keep containers running through a VM shutdown or guarantee recovery after daemon configuration changes.
 
 Only one lifecycle command can run at a time. Cancellation and deadlines terminate the temporary command and its helpers, while Lima's detached VM process can remain running. Inspect the VM before retrying. After interrupted creation, rerun `create` with the same settings if the VM is missing, or `start` if it exists.
 

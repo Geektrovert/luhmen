@@ -10,7 +10,7 @@ keywords = ["docker", "lima", "macos", "containers", "virtualization"]
 categories = ["command-line-utilities", "development-tools"]
 license = "Apache-2.0"
 readme = "README.md"
-include = ["src/**", "tests/**", "scripts/**", "docs/**", "licenses/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "README.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE", "NOTICE", "THIRD_PARTY.md"]
+include = ["/src/**", "/tests/**", "/scripts/**", "/docs/**", "/licenses/**", "/Cargo.toml", "/Cargo.lock", "/rust-toolchain.toml", "/README.md", "/CONTRIBUTING.md", "/SECURITY.md", "/LICENSE", "/NOTICE", "/THIRD_PARTY.md", "!**/__pycache__/**", "!**/*.pyc"]
 
 [dependencies]
 anyhow = "=1.0.104"
@@ -23,7 +23,7 @@ tempfile = "=3.27.0"
 bytes = "=1.12.1"
 http-body-util = "=0.1.5"
 hyper = { version = "=1.11.1", features = ["client", "server", "http1"] }
-hyper-util = { version = "=0.1.20", features = ["tokio"] }
+hyper-util = { version = "=0.1.20", features = ["tokio", "client-legacy", "http1"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
 rustls = { version = "=0.23.44", default-features = false, features = ["std", "ring", "tls12"] }
 time = "=0.3.55"

@@ -31,9 +31,10 @@ jobs:
       - name: Check packaging scripts
         run: |
           python3 -c 'import ast,pathlib; [ast.parse(p.read_text(), filename=str(p)) for root in ("scripts", "tests") for p in pathlib.Path(root).glob("*.py")]'
-          sh -n scripts/install.sh scripts/install-lima.sh scripts/verify-checkout.sh scripts/microvmd.sh scripts/microvmd-service.sh
+          sh -n scripts/install.sh scripts/install-lima.sh scripts/verify-checkout.sh scripts/microvmd.sh scripts/microvmd-service.sh scripts/docker-config-signature.sh scripts/docker-shutdown.sh
           python3 scripts/check-source.py
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Verify installation and dependency licenses
         run: |
           mkdir "$RUNNER_TEMP/luhmen-source"
@@ -44,4 +45,6 @@ jobs:
           "$RUNNER_TEMP/luhmen-install/bin/luhmen" --help
           test -s "$RUNNER_TEMP/luhmen-install/share/licenses/luhmen/dependencies/index.json"
       - name: Verify Cargo source package
-        run: cargo package --locked
+        run: |
+          cargo package --locked
+          python3 scripts/check-cargo-package.py target/package/*.crate

@@ -41,7 +41,23 @@ case "$1" in
   list) printf '{"name":"luhmen","status":"%s","dir":"%s/luhmen","config":{"env":{"LUHMEN_TEST_VALUE":"fixture-only-do-not-print"}}}\n' "$(cat "$LIMA_HOME/luhmen/status")" "$LIMA_HOME" ;;
   stop) printf stop >> "$FIXTURE/workload-actions"; printf Stopped > "$LIMA_HOME/luhmen/status" ;;
   start) printf start >> "$FIXTURE/workload-actions"; printf Running > "$LIMA_HOME/luhmen/status" ;;
-  shell) printf shell >> "$FIXTURE/workload-actions" ;;
+  shell)
+    printf shell >> "$FIXTURE/workload-actions"
+    if test -e "$FIXTURE/reject-guest-shutdown"; then printf 'Docker shutdown rejected\n' >&2; exit 16; fi
+    if test -e "$FIXTURE/wait-guest-shutdown"; then
+      : > "$FIXTURE/guest-shutdown-started"
+      sleep 30
+    fi
+    ;;
+  validate)
+    case "${2##*/}" in
+      [A-Za-z0-9]*) ;;
+      *) printf 'invalid Lima instance identifier in template filename\n' >&2; exit 17 ;;
+    esac
+    if test -e "$FIXTURE/reject-validation"; then printf 'invalid candidate\n' >&2; exit 15; fi
+    if test -e "$FIXTURE/start-during-validation"; then printf Running > "$LIMA_HOME/luhmen/status"; fi
+    cp "$2" "$FIXTURE/validated-template.json"
+    ;;
   *) exit 8 ;;
 esac
 "#,
@@ -630,6 +646,109 @@ fn stop_is_idempotent_and_force_recovers_broken_state_without_deleting_data() {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
+fn failed_docker_shutdown_preserves_vm_and_force_bypasses_the_helper() {
+    let fixture = Fixture::new();
+    let root = fixture.temp.path();
+    let status = root.join("state/lima/luhmen/status");
+    let original_config = fs::read(root.join("state/config.json")).unwrap();
+    fs::write(&status, "Running").unwrap();
+    fs::write(root.join("reject-guest-shutdown"), "").unwrap();
+
+    let output = fixture.run(&["stop"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Docker shutdown rejected"));
+    assert_eq!(fs::read_to_string(&status).unwrap(), "Running");
+    assert_eq!(
+        fs::read_to_string(root.join("workload-actions")).unwrap(),
+        "shell"
+    );
+    assert_eq!(
+        fs::read(root.join("state/config.json")).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        fs::read(root.join("state/lima/luhmen/disk")).unwrap(),
+        b"persistent data"
+    );
+
+    fs::remove_file(root.join("workload-actions")).unwrap();
+    let output = fixture.run(&["stop", "--force", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&status).unwrap(), "Stopped");
+    assert_eq!(
+        fs::read_to_string(root.join("workload-actions")).unwrap(),
+        "stop"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn cancelled_docker_shutdown_never_powers_off_the_vm() {
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let root = fixture.temp.path();
+    let status = root.join("state/lima/luhmen/status");
+    let original_config = fs::read(root.join("state/config.json")).unwrap();
+    fs::write(&status, "Running").unwrap();
+    fs::write(root.join("wait-guest-shutdown"), "").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_luhmen"))
+        .arg("stop")
+        .env("HOME", fs::canonicalize(root).unwrap())
+        .env("FIXTURE", root)
+        .env("LUHMEN_HOME", root.join("state"))
+        .env("LUHMEN_LIMACTL", root.join("limactl"))
+        .env("LUHMEN_DOCKER", root.join("docker"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Allow the host and Lima probes to finish under parallel test load. The
+    // cancellation contract starts only after the guest command is running.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !root.join("guest-shutdown-started").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "stop exited before entering guest shutdown"
+        );
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("guest shutdown was not called within 30 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cancelled"));
+    assert_eq!(fs::read_to_string(&status).unwrap(), "Running");
+    assert_eq!(
+        fs::read_to_string(root.join("workload-actions")).unwrap(),
+        "shell"
+    );
+    assert_eq!(
+        fs::read(root.join("state/config.json")).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        fs::read(root.join("state/lima/luhmen/disk")).unwrap(),
+        b"persistent data"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
 fn unavailable_mounts_do_not_prevent_inspection_or_stopping_the_vm() {
     let fixture = Fixture::new();
     let missing_mount = fs::canonicalize(fixture.temp.path())
@@ -678,4 +797,205 @@ fn unavailable_mounts_do_not_prevent_inspection_or_stopping_the_vm() {
         fs::read(fixture.temp.path().join("state/lima/luhmen/disk")).unwrap(),
         b"persistent data"
     );
+}
+
+fn update_templates(fixture: &Fixture) -> (serde_json::Value, serde_json::Value) {
+    let config: luhmen::config::Config =
+        serde_json::from_slice(&fs::read(fixture.temp.path().join("state/config.json")).unwrap())
+            .unwrap();
+    let current: serde_json::Value =
+        serde_json::from_str(&luhmen::vm_template::render(&config).unwrap()).unwrap();
+    let mut previous = current.clone();
+    previous["provision"][0]["script"] = json!("#!/bin/sh\n# previous provisioning\ntrue\n");
+    for path in ["state/vm.yaml", "state/lima/luhmen/lima.yaml"] {
+        fs::write(
+            fixture.temp.path().join(path),
+            serde_json::to_vec_pretty(&previous).unwrap(),
+        )
+        .unwrap();
+    }
+    (previous, current)
+}
+
+#[test]
+fn update_refreshes_only_provisioning_without_starting_the_vm() {
+    let fixture = Fixture::new();
+    let root = fixture.temp.path();
+    let shared = fs::canonicalize(root).unwrap().join("shared workspace");
+    fs::create_dir(&shared).unwrap();
+    let config = json!({"schema_version":1,"cpus":2,"memory_gib":3,"disk_gib":24,"mounts":[{"path":shared,"writable":true}]});
+    fs::write(
+        root.join("state/config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let (mut previous, mut current) = update_templates(&fixture);
+    // A saved image selection belongs to this VM. A CLI provisioning update must
+    // not replace it with whichever image the new release uses for fresh VMs.
+    previous["images"][0]["location"] = json!("https://example.invalid/saved-image.img");
+    current["images"] = previous["images"].clone();
+    for path in ["state/vm.yaml", "state/lima/luhmen/lima.yaml"] {
+        fs::write(root.join(path), serde_json::to_vec(&previous).unwrap()).unwrap();
+    }
+    let config_bytes = fs::read(root.join("state/config.json")).unwrap();
+    let output = fixture.run(&["update", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["updated"], true);
+    assert_eq!(report["state"], "Stopped");
+    for path in ["state/vm.yaml", "state/lima/luhmen/lima.yaml"] {
+        let updated: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(path)).unwrap()).unwrap();
+        assert_eq!(updated, current);
+    }
+    let validated: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("validated-template.json")).unwrap()).unwrap();
+    assert_eq!(validated, current);
+    assert_eq!(
+        fs::read(root.join("state/config.json")).unwrap(),
+        config_bytes
+    );
+    assert_eq!(
+        fs::read(root.join("state/lima/luhmen/disk")).unwrap(),
+        b"persistent data"
+    );
+    assert!(!root.join("workload-actions").exists());
+    let output = fixture.run(&["update", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["updated"], false);
+}
+
+#[test]
+fn update_refuses_running_or_user_edited_vms() {
+    for changed in ["running", "provisioning", "mounts", "yaml"] {
+        let fixture = Fixture::new();
+        let root = fixture.temp.path();
+        let (mut previous, _) = update_templates(&fixture);
+        match changed {
+            "running" => fs::write(root.join("state/lima/luhmen/status"), "Running").unwrap(),
+            "provisioning" => {
+                previous["provision"][0]["script"] = json!("#!/bin/sh\necho user-edited\n");
+                fs::write(
+                    root.join("state/lima/luhmen/lima.yaml"),
+                    serde_json::to_vec(&previous).unwrap(),
+                )
+                .unwrap();
+            }
+            "mounts" => {
+                previous["mounts"] = json!([{"location":"/user-edited","writable":true}]);
+                fs::write(
+                    root.join("state/lima/luhmen/lima.yaml"),
+                    serde_json::to_vec(&previous).unwrap(),
+                )
+                .unwrap();
+            }
+            "yaml" => fs::write(root.join("state/vm.yaml"), "vmType: vz\n").unwrap(),
+            _ => unreachable!(),
+        }
+        let actual = fs::read(root.join("state/lima/luhmen/lima.yaml")).unwrap();
+        let baseline = fs::read(root.join("state/vm.yaml")).unwrap();
+        let output = fixture.run(&["update", "--json"]);
+        assert!(!output.status.success(), "{changed} must refuse update");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(if changed == "running" {
+                "must be stopped"
+            } else if changed == "yaml" {
+                "JSON"
+            } else {
+                "differs from the saved"
+            }),
+            "{changed}: {error}"
+        );
+        assert_eq!(
+            fs::read(root.join("state/lima/luhmen/lima.yaml")).unwrap(),
+            actual
+        );
+        assert_eq!(fs::read(root.join("state/vm.yaml")).unwrap(), baseline);
+        assert!(!root.join("workload-actions").exists());
+    }
+}
+
+#[test]
+fn update_recovers_after_only_the_vm_template_was_written() {
+    let fixture = Fixture::new();
+    let root = fixture.temp.path();
+    let (_, current) = update_templates(&fixture);
+    fs::write(
+        root.join("state/lima/luhmen/lima.yaml"),
+        serde_json::to_vec(&current).unwrap(),
+    )
+    .unwrap();
+    let actual = fs::read(root.join("state/lima/luhmen/lima.yaml")).unwrap();
+    let output = fixture.run(&["update", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(root.join("state/lima/luhmen/lima.yaml")).unwrap(),
+        actual
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("state/vm.yaml")).unwrap()).unwrap();
+    assert_eq!(baseline, current);
+    assert!(!root.join("workload-actions").exists());
+}
+
+#[test]
+fn update_preserves_templates_when_validation_fails_or_vm_starts() {
+    for trigger in ["reject-validation", "start-during-validation"] {
+        let fixture = Fixture::new();
+        let root = fixture.temp.path();
+        update_templates(&fixture);
+        let before = fs::read(root.join("state/vm.yaml")).unwrap();
+        fs::write(root.join(trigger), b"").unwrap();
+        let output = fixture.run(&["update"]);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(if trigger == "reject-validation" {
+                "validation failed"
+            } else {
+                "must be stopped"
+            }),
+            "{error}"
+        );
+        assert_eq!(fs::read(root.join("state/vm.yaml")).unwrap(), before);
+        assert_eq!(
+            fs::read(root.join("state/lima/luhmen/lima.yaml")).unwrap(),
+            before
+        );
+        assert!(!root.join("workload-actions").exists());
+    }
+}
+
+#[test]
+fn update_refuses_symlinked_templates() {
+    for template in ["state/vm.yaml", "state/lima/luhmen/lima.yaml"] {
+        let fixture = Fixture::new();
+        let root = fixture.temp.path();
+        update_templates(&fixture);
+        let path = root.join(template);
+        let before = fs::read(&path).unwrap();
+        let external = root.join("external-template.json");
+        fs::rename(&path, &external).unwrap();
+        symlink(&external, &path).unwrap();
+        let output = fixture.run(&["update"]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("regular file"));
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(external).unwrap(), before);
+        assert!(!root.join("workload-actions").exists());
+    }
 }

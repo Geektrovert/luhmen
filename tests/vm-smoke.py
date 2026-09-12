@@ -255,6 +255,94 @@ class Suite:
             require(data.get("Config", {}).get("Labels", {}).get(OWNER_LABEL) == self.run_id,
                     "Another workload appeared in luhmen; refusing a VM restart or daemon kill")
 
+    def provisioning(self):
+        """Exercise the rendered guest installer against the real Docker service."""
+        require(not self.docker("ps", "--all", "--quiet").stdout.strip(),
+                "Provisioning check requires an empty Docker VM")
+        document = json.loads(command([self.luhmen, "create", "--dry-run"]).stdout)
+        installer = next(step["script"] for step in document["provision"]
+                         if step["mode"] == "system")
+        script = self.fixture / "docker-provision.sh"
+        script.write_text(installer)
+        original = json.loads(self.guest("sudo", "cat", "/etc/docker/daemon.json").stdout)
+        changed = dict(original)
+        label = "io.luhmen.provision.fixture=" + self.run_id
+        changed["labels"] = [*original.get("labels", []), label]
+        configuration = self.fixture / "daemon-check.json"
+        configuration.write_text(json.dumps(changed))
+        original_socket = self.guest("sudo", "cat", "/etc/systemd/system/docker.socket").stdout
+        original_socket_mode = self.guest("stat", "-c", "%a", "/var/run/docker.sock").stdout
+        socket_configuration = self.fixture / "docker-check.socket"
+        socket_configuration.write_text(re.sub(r"(?m)^SocketMode=.*$", "SocketMode=0640", original_socket))
+        result = self.guest("sudo", "sh", "-c", r'''
+set -eu
+script=$1
+configuration=$2
+socket_configuration=$3
+label=$4
+backup=$(mktemp -d /etc/docker/.luhmen-provision.XXXXXX)
+cp -p /etc/docker/daemon.json "$backup/daemon.json"
+cp -p /etc/systemd/system/docker.socket "$backup/docker.socket"
+provision() {
+    # These test transitions intentionally exceed normal startup frequency.
+    systemctl reset-failed docker.service docker.socket
+    sh "$script"
+}
+restore() {
+    cp -p "$backup/daemon.json" /etc/docker/daemon.json
+    cp -p "$backup/docker.socket" /etc/systemd/system/docker.socket
+    provision
+    rm -rf "$backup"
+}
+trap restore EXIT
+trap 'exit 1' HUP INT TERM
+provision
+before=$(systemctl show docker.service -p MainPID --value)
+test "$before" -gt 0
+provision
+test "$before" = "$(systemctl show docker.service -p MainPID --value)"
+test "$(curl -fsS --unix-socket /var/run/docker.sock http://localhost/_ping)" = OK
+install -m 0600 "$configuration" /etc/docker/daemon.json
+provision
+test "$before" != "$(systemctl show docker.service -p MainPID --value)"
+docker info --format '{{json .Labels}}'
+# Reproduce a daemon started with different config before Lima restores its
+# desired file. A stamp written only by the installer misses this transition.
+cp -p "$backup/daemon.json" /etc/docker/daemon.json
+provision
+install -m 0600 "$configuration" /etc/docker/daemon.json
+systemctl reset-failed docker.service docker.socket
+systemctl restart docker.service
+docker info --format '{{json .Labels}}' | grep -F -- "$label"
+before=$(systemctl show docker.service -p MainPID --value)
+cp -p "$backup/daemon.json" /etc/docker/daemon.json
+provision
+test "$before" != "$(systemctl show docker.service -p MainPID --value)"
+if docker info --format '{{json .Labels}}' | grep -F -- "$label"; then exit 1; fi
+# Reloading unit definitions does not change an existing socket's mode. The
+# installer must replace the listener and Docker's inherited descriptor.
+install -m 0644 "$socket_configuration" /etc/systemd/system/docker.socket
+before=$(systemctl show docker.service -p MainPID --value)
+provision
+test "$(stat -c %a /var/run/docker.sock)" = 640
+test "$before" != "$(systemctl show docker.service -p MainPID --value)"
+test "$(curl -fsS --unix-socket /var/run/docker.sock http://localhost/_ping)" = OK
+before=$(systemctl show docker.service -p MainPID --value)
+provision
+test "$before" = "$(systemctl show docker.service -p MainPID --value)"
+''', "luhmen-provision-check", str(script), str(configuration), str(socket_configuration), label,
+                            timeout=180)
+        require(label in result.stdout, "Docker did not load the changed configuration")
+        require(json.loads(self.guest("sudo", "cat", "/etc/docker/daemon.json").stdout) == original,
+                "Docker configuration was not restored")
+        require(self.guest("sudo", "cat", "/etc/systemd/system/docker.socket").stdout == original_socket,
+                "Docker socket unit was not restored")
+        require(self.guest("stat", "-c", "%a", "/var/run/docker.sock").stdout == original_socket_mode,
+                "Effective Docker socket permissions were not restored")
+        emit("docker_provisioning_idempotence_and_config_reload", "passed",
+             checks=["unchanged_pid", "changed_config", "configuration_loaded_before_provisioning",
+                     "effective_socket_mode", "configuration_restored"])
+
     def prepare_fixture(self):
         self.fixture.mkdir(mode=0o700)
         (self.fixture / ".luhmen-smoke.json").write_text(json.dumps({"run_id": self.run_id}) + "\n")
@@ -289,6 +377,19 @@ class Suite:
             "volumes": {"persistent": {"labels": {OWNER_LABEL: self.run_id}}},
             "networks": {"default": {"labels": {OWNER_LABEL: self.run_id}}},
         }
+        if getattr(self.args, "slow_shutdown", False):
+            # The guest must finish this after Lima's own 30-second VZ timeout
+            # would have expired. Docker shutdown must happen before that clock.
+            compose["services"]["shutdown-proof"] = {
+                "image": BASE_IMAGE, "labels": {OWNER_LABEL: self.run_id},
+                "restart": "unless-stopped", "stop_grace_period": "40s",
+                "cpus": 0.25, "mem_limit": "32m", "pids_limit": 16,
+                "network_mode": "none",
+                "volumes": [{"type": "volume", "source": "persistent", "target": "/data"}],
+                "command": ["sh", "-c", "trap 'if ! test -f /data/shutdown-proof; then sleep 32; fi; "
+                            f"printf {self.token} > /data/shutdown-proof; sync; exit 0' TERM; "
+                            "while :; do sleep 1; done"],
+            }
         (self.fixture / "compose.json").write_text(json.dumps(compose, indent=2) + "\n")
         emit("fixture", "created", path=str(self.fixture), project=self.run_id, port=self.port)
 
@@ -551,6 +652,13 @@ class Suite:
         require(value == self.token, "Named volume data changed across VM restart")
         require(self.docker("exec", self.container_id, "cat", "/shared/host.txt").stdout == self.token,
                 "Host mount was not restored after restart")
+        if getattr(self.args, "slow_shutdown", False):
+            require(self.docker("exec", self.container_id, "cat", "/data/shutdown-proof").stdout == self.token,
+                    "The guest was stopped before the container completed its 32-second shutdown")
+            require(self.docker("info", "--format", "{{.LiveRestoreEnabled}}").stdout.strip() == "true",
+                    "Live restore was not restored after VM restart")
+            emit("slow_container_graceful_shutdown", "passed", shutdown_delay_seconds=32,
+                 container_grace_seconds=40)
         emit("restart_volume_mount_and_port_persistence", "passed", seconds=time.monotonic() - started)
 
     def recovery(self):
@@ -671,6 +779,7 @@ def main():
     parser.add_argument("--luhmen", default="luhmen", help="Path to the luhmen executable")
     parser.add_argument("--recovery", action="store_true", help="Also kill the VM's Docker daemon and verify recovery")
     parser.add_argument("--watchers", action="store_true", help="Install snapshot-pinned inotify-tools in the guest and check watcher events")
+    parser.add_argument("--slow-shutdown", action="store_true", help="Also verify a container can flush for 32 seconds before VM shutdown")
     args = parser.parse_args()
     if not args.run:
         parser.error("No actions taken. Pass --run to run this suite and restart the luhmen VM.")
@@ -680,6 +789,7 @@ def main():
         suite = Suite(args)
         suite.preflight()
         suite.prepare_fixture()
+        suite.provisioning()
         suite.workloads()
         suite.coherence()
         suite.port_lifecycle()

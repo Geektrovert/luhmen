@@ -4,7 +4,7 @@ luhmen runs Docker Engine in a dedicated Linux VM on Apple Silicon Macs. Its Rus
 
 This is a development preview for local development. Expect CLI and configuration changes before a stable release. See [supported platforms, versions, and limits](docs/support.md).
 
-The source tree includes unreleased nested Firecracker support. Homebrew currently installs v0.1.0, which does not include that support.
+The source tree includes unreleased provisioning updates, HTTPS streaming, and nested Firecracker support. Homebrew currently installs v0.1.0, which does not include those changes.
 
 ## Requirements
 
@@ -71,7 +71,7 @@ The kernel and root filesystem must already be visible inside the Lima VM. The f
 - Containers run as Linux arm64. Rosetta and x86 emulation are disabled.
 - File contents sync through VirtioFS. Lima forwards host changes as attribute notifications; development servers that require `MODIFY` events or reliable create/rename/delete detection need polling.
 - VM upgrades, data migration, backups, and disk reclamation are manual. Keep important data backed up.
-- Local HTTPS is optional and does not support WebSockets or streaming.
+- Local HTTPS streams HTTP/1 responses. WebSockets and CONNECT tunnels are unsupported.
 
 See [troubleshooting](docs/runtime.md#recovery-and-diagnostics) for common failures. Report bugs and propose changes through [GitHub issues](https://github.com/Geektrovert/luhmen/issues). Report vulnerabilities according to the [security policy](SECURITY.md).
 

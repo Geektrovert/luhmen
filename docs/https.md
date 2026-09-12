@@ -43,18 +43,20 @@ Browsers report an untrusted certificate until you trust the CA through the brow
 
 Restart the daemon after changing routes. Ctrl-C lets requests drain for five seconds, then cancels remaining connections. It leaves the VM and containers running.
 
-The proxy supports buffered HTTP/1 exchanges. WebSockets, CONNECT tunnels, streaming responses, and server-sent events are unsupported.
+The proxy buffers and validates HTTP/1 uploads before forwarding them. Responses stream as upstream chunks arrive, and client backpressure reaches the upstream. Client and upstream connections can be reused. WebSockets and CONNECT tunnels are unsupported. Response streams, including server-sent events, must fit within the size and exchange limits below.
 
 | Limit | Value |
 | --- | --- |
 | Routes | 32 |
 | Simultaneous connections | 32 |
-| Active buffered exchanges | 4 |
+| Active exchanges | 8 |
 | Request or response body | 8 MiB each |
 | TLS handshake timeout | 5 seconds |
 | Exchange timeout | 30 seconds |
 
-An exchange occupies its slot until the connection finishes, including writes to slow clients. When all four slots are occupied, new requests receive HTTP 503. Each slot reserves 32 MiB of body-buffer capacity. The 128 MiB total excludes headers, TLS, sockets, and runtime overhead.
+An exchange occupies its slot until its response finishes, including writes to slow clients. When all eight slots are occupied, new requests receive HTTP 503. Upload buffers reserve up to 128 MiB in total, excluding headers, TLS, sockets, and runtime overhead. The upstream pool retains at most one idle connection per loopback port for 30 seconds.
+
+A response with a known oversized length receives HTTP 502 before forwarding. If a streamed response exceeds the limit, times out, or fails after headers have been sent, the proxy terminates that response. Clients must treat it as incomplete.
 
 TLS server names and HTTP `Host` headers must match the same configured route. Unknown TLS names fail the handshake. Upstream connections use loopback directly and ignore host HTTP proxy environment variables.
 

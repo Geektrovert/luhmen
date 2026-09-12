@@ -54,6 +54,11 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Refresh a stopped VM's provisioning after upgrading the CLI.
+    Update {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show actual VM and Engine state.
     Inspect {
         #[arg(long)]
@@ -224,6 +229,17 @@ fn execute(cli: Cli, cancelled: Cancellation) -> Result<()> {
             }
         }
         Action::Start { json } => report(runtime.start()?, json),
+        Action::Update { json } => {
+            let report = runtime.update()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.updated {
+                println!("VM provisioning updated. Run `luhmen start` to apply it.");
+            } else {
+                println!("VM provisioning is current.");
+            }
+            Ok(())
+        }
         Action::Inspect { json } => report(runtime.inspect()?, json),
         Action::Stop { force, json } => report(runtime.stop(force)?, json),
         Action::Restart { json } => report(runtime.restart()?, json),
